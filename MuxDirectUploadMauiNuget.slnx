@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Mux.AuthUrl.Api/Mux.AuthUrl.Api.csproj" />
+  </Folder>
+  <Project Path="Mux.DirectUpload.Demo/Mux.DirectUpload.Demo.csproj" />
+  <Project Path="Mux.DirectUpload.Maui/Mux.DirectUpload.Maui.csproj" />
+</Solution>

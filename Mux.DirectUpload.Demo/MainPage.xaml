@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="Mux.DirectUpload.Demo.MainPage"
+             Title="Mux Upload Demo">
+    <ScrollView>
+        <VerticalStackLayout Padding="24" Spacing="12">
+            <Label Text="Mux Direct Upload Demo (.NET 10 MAUI)"
+                   FontAttributes="Bold"
+                   FontSize="20" />
+
+            <Label Text="Backend Base URL (your secure API):" />
+            <Entry x:Name="BackendBaseUrlEntry"
+                   Placeholder="https://your-api.example.com"
+                   Text="https://localhost:5001" />
+
+            <Label Text="Auth URL Endpoint Path:" />
+            <Entry x:Name="EndpointPathEntry"
+                   Placeholder="/api/mux/direct-upload-url"
+                   Text="/api/mux/direct-upload-url" />
+
+            <Label Text="Optional MIME type (video/mp4):" />
+            <Entry x:Name="ContentTypeEntry"
+                   Placeholder="video/mp4"
+                   Text="video/mp4" />
+
+            <Button x:Name="PickFileButton"
+                    Text="1) Pick Video File"
+                    Clicked="OnPickFileClicked" />
+
+            <Label x:Name="SelectedFileLabel"
+                   Text="No file selected"
+                   LineBreakMode="CharacterWrap" />
+
+            <Button x:Name="StartUploadButton"
+                    Text="2) Start Upload"
+                    IsEnabled="False"
+                    Clicked="OnStartUploadClicked" />
+
+            <Button x:Name="CancelUploadButton"
+                    Text="Cancel Upload"
+                    IsEnabled="False"
+                    Clicked="OnCancelUploadClicked" />
+
+            <ProgressBar x:Name="UploadProgressBar"
+                         Progress="0" />
+            <Label x:Name="ProgressLabel"
+                   Text="Progress: 0%"
+                   FontAttributes="Italic" />
+
+            <Label x:Name="StatusLabel"
+                   Text="Status: idle"
+                   LineBreakMode="WordWrap" />
+        </VerticalStackLayout>
+    </ScrollView>
+</ContentPage>
