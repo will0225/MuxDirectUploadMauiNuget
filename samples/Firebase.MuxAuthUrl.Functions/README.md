@@ -16,6 +16,7 @@ This sample exposes a Firebase HTTPS function that returns a Mux Direct Upload U
 
 ```bash
 cd samples/Firebase.MuxAuthUrl.Functions
+cd functions
 npm install
 ```
 
@@ -29,6 +30,7 @@ firebase functions:secrets:set MUX_TOKEN_SECRET
 ## 4) Deploy
 
 ```bash
+cd ..
 firebase deploy --only functions:getMuxDirectUploadUrl
 ```
 
