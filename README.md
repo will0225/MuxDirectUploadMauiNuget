@@ -11,6 +11,7 @@ This repository is licensed under **Apache-2.0**, matching the Mux iOS and Andro
 - `Mux.DirectUpload.Maui` - reusable library/NuGet package.
 - `Mux.DirectUpload.Demo` - .NET 10 MAUI demo app (Android + iOS + Windows).
 - `samples/Mux.AuthUrl.Api` - sample backend API that creates Direct Upload URLs via Mux API.
+- `samples/Firebase.MuxAuthUrl.Functions` - Firebase Functions (Node.js) sample auth endpoint for Direct Upload URLs.
 
 ## Build
 
