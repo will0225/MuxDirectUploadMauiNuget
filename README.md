@@ -18,6 +18,7 @@ This repository is licensed under **Apache-2.0**, matching the Mux iOS and Andro
 ```bash
 dotnet build -c Release Mux.DirectUpload.Maui/Mux.DirectUpload.Maui.csproj
 dotnet pack -c Release Mux.DirectUpload.Maui/Mux.DirectUpload.Maui.csproj -o artifacts
+# The NuGet package is created only by `dotnet pack` (not plain `dotnet build`). Output: `artifacts/Mux.DirectUpload.Maui.1.0.0.nupkg` (version from the csproj).
 dotnet build -c Release Mux.DirectUpload.Demo/Mux.DirectUpload.Demo.csproj -f net10.0-windows10.0.19041.0
 dotnet build -c Release samples/Mux.AuthUrl.Api/Mux.AuthUrl.Api.csproj
 ```
