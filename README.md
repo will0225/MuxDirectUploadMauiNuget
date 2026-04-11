@@ -23,6 +23,28 @@ dotnet build -c Release Mux.DirectUpload.Demo/Mux.DirectUpload.Demo.csproj -f ne
 dotnet build -c Release samples/Mux.AuthUrl.Api/Mux.AuthUrl.Api.csproj
 ```
 
+On **macOS**, build the demo for iOS or Mac Catalyst instead of Windows, for example:
+
+```bash
+dotnet build -c Debug Mux.DirectUpload.Demo/Mux.DirectUpload.Demo.csproj -f net10.0-ios
+dotnet build -c Debug Mux.DirectUpload.Demo/Mux.DirectUpload.Demo.csproj -f net10.0-maccatalyst
+```
+
+## Test on Mac (iOS / Mac Catalyst)
+
+1. **Machine:** Apple Silicon or Intel Mac with enough disk space for Xcode.
+2. **Install:** [Xcode](https://developer.apple.com/xcode/) from the App Store (includes iOS Simulator). Open Xcode once and accept the license; install a simulator runtime if prompted.
+3. **Install .NET 10 SDK** (same major version as the repo) from [Microsoft’s download page](https://dotnet.microsoft.com/download).
+4. **Install MAUI workload:**
+
+   ```bash
+   dotnet workload install maui
+   ```
+
+5. **Clone or copy** this repository onto the Mac and open `MuxDirectUploadMauiNuget.slnx` in **Visual Studio Code** or **Cursor** (C# / .NET MAUI extensions) or **JetBrains Rider**, or build from the terminal with the commands above.
+6. **Run:** Set the startup project to `Mux.DirectUpload.Demo` and pick an **iOS Simulator** or a **connected iPhone** (with signing configured in the project). For Mac desktop testing, choose **Mac Catalyst** as the target.
+7. **Backend:** Run your auth URL API (ASP.NET sample, Firebase function, or other host) on a URL reachable from the simulator/device (use your LAN IP or HTTPS tunnel, not only `localhost`, if the device cannot reach your PC’s localhost).
+
 ## Demo app usage
 
 1. Start your auth-url backend API.
