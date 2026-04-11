@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "first-500d7"
-  }
+    "default": "first-500d7",
+    "production": "muxpackageauthapi"
+  },
+  "targets": {},
+  "etags": {}
 }

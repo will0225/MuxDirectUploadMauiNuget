@@ -1,12 +1,36 @@
+const {setGlobalOptions} = require("firebase-functions/v2");
 const {onRequest} = require("firebase-functions/v2/https");
+const {defineSecret} = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
-const admin = require("firebase-admin");
 
-admin.initializeApp();
+setGlobalOptions({region: "us-central1"});
+
+const muxTokenId = defineSecret("MUX_TOKEN_ID");
+const muxTokenSecret = defineSecret("MUX_TOKEN_SECRET");
+
+/**
+ * Lazy-load firebase-admin so deploy-time code discovery does not block on ADC /
+ * metadata during "firebase deploy" (avoids "Timeout after 10000" while analyzing).
+ */
+function getAuth() {
+  const admin = require("firebase-admin");
+  if (!admin.apps.length) {
+    let projectId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+    if (!projectId && process.env.FIREBASE_CONFIG) {
+      try {
+        projectId = JSON.parse(process.env.FIREBASE_CONFIG).projectId;
+      } catch {
+        // ignore
+      }
+    }
+    admin.initializeApp(projectId ? {projectId} : {});
+  }
+  return admin.auth();
+}
 
 function readMuxConfig() {
-  const tokenId = process.env.MUX_TOKEN_ID;
-  const tokenSecret = process.env.MUX_TOKEN_SECRET;
+  const tokenId = muxTokenId.value();
+  const tokenSecret = muxTokenSecret.value();
 
   if (!tokenId || !tokenSecret) {
     throw new Error("Missing MUX_TOKEN_ID or MUX_TOKEN_SECRET secrets.");
@@ -23,7 +47,7 @@ async function verifyFirebaseBearerToken(req) {
   }
 
   try {
-    const decoded = await admin.auth().verifyIdToken(match[1]);
+    const decoded = await getAuth().verifyIdToken(match[1]);
     return {ok: true, uid: decoded.uid};
   } catch (err) {
     logger.warn("Invalid Firebase token", err);
@@ -33,7 +57,8 @@ async function verifyFirebaseBearerToken(req) {
 
 async function createMuxDirectUploadUrl() {
   const {tokenId, tokenSecret} = readMuxConfig();
-  const basic = Buffer.from(`${tokenId}:${tokenSecret}`, "utf8").toString("base64");
+  const basic = Buffer.from(`${tokenId}:${tokenSecret}`, "utf8")
+      .toString("base64");
 
   const payload = {
     cors_origin: "*",
@@ -47,7 +72,7 @@ async function createMuxDirectUploadUrl() {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Basic ${basic}`,
+      "authorization": `Basic ${basic}`,
     },
     body: JSON.stringify(payload),
   });
@@ -79,9 +104,8 @@ async function createMuxDirectUploadUrl() {
 
 exports.getMuxDirectUploadUrl = onRequest(
     {
-      region: "us-central1",
       cors: true,
-      secrets: ["MUX_TOKEN_ID", "MUX_TOKEN_SECRET"],
+      secrets: [muxTokenId, muxTokenSecret],
     },
     async (req, res) => {
       if (req.method !== "GET") {
