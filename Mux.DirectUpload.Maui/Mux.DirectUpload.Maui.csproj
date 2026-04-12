@@ -8,9 +8,9 @@
 
     <!-- NuGet metadata -->
     <PackageId>Mux.DirectUpload.Maui</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>KJM</Authors>
-    <Description>Direct upload to Mux Video from .NET MAUI (iOS/Android) using Direct Upload URLs.</Description>
+    <Description>Direct upload to Mux Video from .NET MAUI (iOS/Android) using Direct Upload URLs. Supports file path or Stream (e.g. MediaPicker).</Description>
     <PackageTags>mux;video;upload;maui;direct-upload</PackageTags>
     <RepositoryUrl>https://example.invalid</RepositoryUrl>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
