@@ -47,3 +47,23 @@ await task;
 
 If the stream is not seekable and you cannot supply `contentLength`, progress may not show a total size and the PUT may use chunked encoding (depending on runtime); some storage backends require a known length.
 
+## Firebase auth URL (Bearer token)
+
+The package does **not** embed Firebase SDKs. Your app signs in with Firebase Auth and supplies the **ID token**.
+
+Use **`BearerMuxAuthUrlProvider`**: it adds `Authorization: Bearer` only to the auth-url **GET**, not to the Mux **PUT** (avoid putting `DefaultRequestHeaders.Authorization` on the same `HttpClient` used for upload).
+
+```csharp
+var http = new HttpClient { BaseAddress = new Uri("https://us-central1-PROJECT.cloudfunctions.net") };
+var auth = new BearerMuxAuthUrlProvider(
+    http,
+    endpointPath: "/getMuxDirectUploadUrl", // or "/" for some Cloud Run URLs
+    getBearerTokenAsync: async ct => await firebaseAuthUser.GetIdTokenAsync());
+
+var uploader = new MuxDirectUploader(http, auth);
+```
+
+Replace `GetIdTokenAsync` with your Firebase user API. For **token refresh**, return a fresh token each call (Firebase SDK usually handles that when you call `GetIdTokenAsync(true)` if needed).
+
+You **cannot** “pass Firebase automatically” from the Cloud Function alone: the app must identify the user; the function only verifies the JWT. Alternatives (API keys in the app, unauthenticated endpoints) are weaker and not recommended.
+
