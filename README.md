@@ -73,6 +73,7 @@ This endpoint is offered for **testing and demos** only; it may be rate-limited,
 2. In the app, set:
    - Backend base URL, e.g. `https://your-api.example.com` or the shared test URL
    - Endpoint path, e.g. `/api/mux/direct-upload-url`, or `/` for the shared Firebase test URL
+   - **Firebase ID token** (demo screen): required when the auth URL is a Firebase / Cloud Run function; paste a token from Firebase Auth after sign-in, or from the Identity Toolkit REST API. Not needed for the local ASP.NET sample unless you add auth there.
 3. Pick a local video file.
 4. Start upload and observe progress.
 

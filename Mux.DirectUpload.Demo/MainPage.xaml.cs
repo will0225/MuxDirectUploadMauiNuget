@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Net.Http.Headers;
 using Mux.DirectUpload.Maui;
 
 namespace Mux.DirectUpload.Demo;
@@ -48,6 +49,16 @@ public partial class MainPage : ContentPage
             return;
         }
 
+        var baseUrlText = BackendBaseUrlEntry.Text?.Trim() ?? "";
+        var looksLikeFirebaseFunction = baseUrlText.Contains("cloudfunctions.net", StringComparison.OrdinalIgnoreCase)
+            || baseUrlText.Contains(".run.app", StringComparison.OrdinalIgnoreCase);
+        var firebaseToken = FirebaseIdTokenEntry.Text?.Trim();
+        if (looksLikeFirebaseFunction && string.IsNullOrWhiteSpace(firebaseToken))
+        {
+            StatusLabel.Text = "Status: paste a Firebase ID token (required for Firebase auth URL)";
+            return;
+        }
+
         try
         {
             StartUploadButton.IsEnabled = false;
@@ -60,6 +71,9 @@ public partial class MainPage : ContentPage
             var videoStream = await _pickedVideo.OpenReadAsync();
 
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
+            if (!string.IsNullOrWhiteSpace(firebaseToken))
+                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", firebaseToken);
+
             var authProvider = new HttpMuxAuthUrlProvider(
                 httpClient,
                 endpointPath: string.IsNullOrWhiteSpace(EndpointPathEntry.Text)
