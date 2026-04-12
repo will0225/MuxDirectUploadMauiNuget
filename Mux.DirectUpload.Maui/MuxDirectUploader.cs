@@ -32,54 +32,145 @@ public sealed class MuxDirectUploader
             throw new ArgumentOutOfRangeException(nameof(bufferSizeBytes), "Buffer size must be positive.");
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
-        var task = UploadInternalAsync(filePath, bufferSizeBytes, contentType, progress, cts.Token);
+        var task = UploadFromFileAsync(filePath, bufferSizeBytes, contentType, progress, cts.Token);
         return (new MuxUploadHandle(cts), task);
     }
 
-    private async Task UploadInternalAsync(
+    /// <summary>
+    /// Starts a direct upload from a stream (e.g. MAUI MediaPicker <c>OpenReadAsync()</c> when no usable file path is available).
+    /// </summary>
+    /// <param name="stream">Stream to read. Disposed after the upload completes unless <paramref name="leaveOpen"/> is true.</param>
+    /// <param name="contentLength">
+    /// Total byte length when <paramref name="stream"/> is not seekable (so length cannot be discovered).
+    /// Omit when the stream is seekable. Used for progress and for the HTTP Content-Length header when supported.
+    /// </param>
+    /// <param name="bufferSizeBytes">Buffer size for copying from <paramref name="stream"/>.</param>
+    /// <param name="contentType">Optional Content-Type for the PUT body.</param>
+    /// <param name="leaveOpen">If true, <paramref name="stream"/> is not disposed after upload.</param>
+    /// <param name="progress">Reports bytes sent; <see cref="MuxUploadProgress.Percent"/> is null if total size is unknown.</param>
+    /// <param name="externalToken">Cancellation token.</param>
+    public (MuxUploadHandle handle, Task uploadTask) StartUploadAsync(
+        Stream stream,
+        long? contentLength = null,
+        int bufferSizeBytes = 1024 * 1024,
+        string? contentType = null,
+        bool leaveOpen = false,
+        IProgress<MuxUploadProgress>? progress = null,
+        CancellationToken externalToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (bufferSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(bufferSizeBytes), "Buffer size must be positive.");
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        var task = UploadFromStreamAsync(stream, contentLength, leaveOpen, bufferSizeBytes, contentType, progress, cts.Token);
+        return (new MuxUploadHandle(cts), task);
+    }
+
+    private async Task UploadFromFileAsync(
         string filePath,
         int bufferSizeBytes,
         string? contentType,
         IProgress<MuxUploadProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var uploadUrl = await _authUrlProvider.GetUploadUrlAsync(cancellationToken);
-
-        var fileInfo = new FileInfo(filePath);
-        var totalBytes = fileInfo.Length;
-
         await using var fileStream = File.OpenRead(filePath);
-
-        using var content = new ProgressableStreamContent(
+        await UploadCoreAsync(
             fileStream,
+            disposeStream: false,
+            explicitLength: null,
             bufferSizeBytes,
-            sent => progress?.Report(new MuxUploadProgress(sent, totalBytes)),
+            contentType,
+            progress,
+            cancellationToken);
+    }
+
+    private Task UploadFromStreamAsync(
+        Stream stream,
+        long? explicitLength,
+        bool leaveOpen,
+        int bufferSizeBytes,
+        string? contentType,
+        IProgress<MuxUploadProgress>? progress,
+        CancellationToken cancellationToken) =>
+        UploadCoreAsync(
+            stream,
+            disposeStream: !leaveOpen,
+            explicitLength,
+            bufferSizeBytes,
+            contentType,
+            progress,
             cancellationToken);
 
-        if (!string.IsNullOrWhiteSpace(contentType))
-            content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-
-        using var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+    private async Task UploadCoreAsync(
+        Stream sourceStream,
+        bool disposeStream,
+        long? explicitLength,
+        int bufferSizeBytes,
+        string? contentType,
+        IProgress<MuxUploadProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
         {
-            Content = content
-        };
+            var uploadUrl = await _authUrlProvider.GetUploadUrlAsync(cancellationToken);
 
-        request.Headers.ExpectContinue = false;
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
+            var totalForProgress = ResolveTotalBytes(sourceStream, explicitLength);
+            var lengthForHttp = ResolveHttpContentLength(sourceStream, explicitLength);
 
-        using var response = await _httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
+            using var content = new ProgressableStreamContent(
+                sourceStream,
+                bufferSizeBytes,
+                sent => progress?.Report(new MuxUploadProgress(sent, totalForProgress)),
+                cancellationToken,
+                lengthForHttp);
 
-        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
-        {
-            var body = await SafeReadBodyAsync(response, cancellationToken);
-            throw new HttpRequestException($"Upload unauthorized/forbidden. Status={(int)response.StatusCode}. Body={body}");
+            if (!string.IsNullOrWhiteSpace(contentType))
+                content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+            {
+                Content = content
+            };
+
+            request.Headers.ExpectContinue = false;
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
+
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+
+            if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
+            {
+                var body = await SafeReadBodyAsync(response, cancellationToken);
+                throw new HttpRequestException($"Upload unauthorized/forbidden. Status={(int)response.StatusCode}. Body={body}");
+            }
+
+            response.EnsureSuccessStatusCode();
+
+            if (totalForProgress.HasValue)
+                progress?.Report(new MuxUploadProgress(totalForProgress.Value, totalForProgress.Value));
         }
+        finally
+        {
+            if (disposeStream)
+                await sourceStream.DisposeAsync();
+        }
+    }
 
-        response.EnsureSuccessStatusCode();
-        progress?.Report(new MuxUploadProgress(totalBytes, totalBytes));
+    private static long? ResolveTotalBytes(Stream stream, long? explicitLength)
+    {
+        if (stream.CanSeek)
+            return stream.Length;
+        return explicitLength;
+    }
+
+    private static long? ResolveHttpContentLength(Stream stream, long? explicitLength)
+    {
+        if (stream.CanSeek)
+            return stream.Length;
+        return explicitLength;
     }
 
     private static async Task<string> SafeReadBodyAsync(HttpResponseMessage response, CancellationToken ct)
@@ -94,13 +185,20 @@ public sealed class MuxDirectUploader
         private readonly int _bufferSize;
         private readonly Action<long> _onProgress;
         private readonly CancellationToken _ct;
+        private readonly long? _knownLength;
 
-        public ProgressableStreamContent(Stream source, int bufferSize, Action<long> onProgress, CancellationToken ct)
+        public ProgressableStreamContent(
+            Stream source,
+            int bufferSize,
+            Action<long> onProgress,
+            CancellationToken ct,
+            long? knownLength)
         {
             _source = source;
             _bufferSize = bufferSize;
             _onProgress = onProgress;
             _ct = ct;
+            _knownLength = knownLength;
         }
 
         protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
@@ -124,6 +222,12 @@ public sealed class MuxDirectUploader
 
         protected override bool TryComputeLength(out long length)
         {
+            if (_knownLength.HasValue)
+            {
+                length = _knownLength.Value;
+                return true;
+            }
+
             if (_source.CanSeek)
             {
                 length = _source.Length;
@@ -135,4 +239,3 @@ public sealed class MuxDirectUploader
         }
     }
 }
-

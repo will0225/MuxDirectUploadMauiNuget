@@ -12,6 +12,7 @@ This repository is licensed under **Apache-2.0**, matching the Mux iOS and Andro
 - `Mux.DirectUpload.Demo` - .NET 10 MAUI demo app (Android + iOS + Windows).
 - `samples/Mux.AuthUrl.Api` - sample backend API that creates Direct Upload URLs via Mux API.
 - `samples/Firebase.MuxAuthUrl.Functions` - Firebase Functions (Node.js) sample auth endpoint for Direct Upload URLs.
+- **Shared Firebase test URL** (no backend required for quick tests): `https://getmuxdirectuploadurl-fy5arhfiaq-uc.a.run.app` — details in [Shared test auth URL](#shared-test-auth-url-firebase) below.
 
 ## Build
 
@@ -45,12 +46,33 @@ dotnet build -c Debug Mux.DirectUpload.Demo/Mux.DirectUpload.Demo.csproj -f net1
 6. **Run:** Set the startup project to `Mux.DirectUpload.Demo` and pick an **iOS Simulator** or a **connected iPhone** (with signing configured in the project). For Mac desktop testing, choose **Mac Catalyst** as the target.
 7. **Backend:** Run your auth URL API (ASP.NET sample, Firebase function, or other host) on a URL reachable from the simulator/device (use your LAN IP or HTTPS tunnel, not only `localhost`, if the device cannot reach your PC’s localhost).
 
+### iOS device: MT1006 and “The input string '1 (a)' was not in a correct format”
+
+This usually comes from **Apple’s iOS/iPadOS build labels** like `26.3.1 (a)` (security update), which older **mlaunch** tooling misparses—**not** from your app version in the csproj. Typical fixes:
+
+- **Update the device** to a newer iOS/iPadOS (e.g. **26.4+**) if available; many users report that resolves deploy.
+- **Use the iOS Simulator** on the Mac until your .NET iOS workload includes the fix.
+- **Rename the device** in Settings → General → About if the name contains **apostrophes** or odd characters (another reported parser failure).
+- Track upstream: [dotnet/maui#34555](https://github.com/dotnet/maui/issues/34555), [dotnet/macios#24935](https://github.com/dotnet/macios/issues/24935).
+
+## Shared test auth URL (Firebase)
+
+A deployed sample Firebase function is available so you can try the flow without hosting your own API:
+
+- **Base URL:** `https://getmuxdirectuploadurl-fy5arhfiaq-uc.a.run.app`
+- **Method:** `GET` against the service root (use `/` as the path when configuring `HttpClient`).
+- **Auth:** send a valid Firebase **ID token** in `Authorization: Bearer <token>` (see `samples/Firebase.MuxAuthUrl.Functions/README.md`).
+
+In the MAUI demo, set the HTTP client **base address** to the URL above (no trailing slash required) and the auth-url **path** to `/`. Ensure the app attaches the Bearer token to requests (the packaged `HttpMuxAuthUrlProvider` only calls the URL; it does not sign in to Firebase for you).
+
+This endpoint is offered for **testing and demos** only; it may be rate-limited, changed, or taken down. Production apps should deploy and control their own backend.
+
 ## Demo app usage
 
-1. Start your auth-url backend API.
+1. Start your auth-url backend API (or use the shared test URL above).
 2. In the app, set:
-   - Backend base URL, e.g. `https://your-api.example.com`
-   - Endpoint path, e.g. `/api/mux/direct-upload-url`
+   - Backend base URL, e.g. `https://your-api.example.com` or the shared test URL
+   - Endpoint path, e.g. `/api/mux/direct-upload-url`, or `/` for the shared Firebase test URL
 3. Pick a local video file.
 4. Start upload and observe progress.
 

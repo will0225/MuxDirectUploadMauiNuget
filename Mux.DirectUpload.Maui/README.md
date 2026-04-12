@@ -30,3 +30,20 @@ var (handle, task) = uploader.StartUploadAsync(
 await task;
 ```
 
+### Upload from a `Stream` (e.g. MAUI MediaPicker)
+
+When you cannot rely on a file path (e.g. `MediaPicker` / `OpenReadAsync()`), use the overload that accepts a `Stream`. The stream is disposed after the upload unless you pass `leaveOpen: true`.
+
+```csharp
+var stream = await fileResult.OpenReadAsync();
+var (handle, task) = uploader.StartUploadAsync(
+    stream,
+    contentLength: stream.CanSeek ? null : knownLengthIfAvailable,
+    contentType: "video/mp4",
+    leaveOpen: false,
+    progress: progress);
+await task;
+```
+
+If the stream is not seekable and you cannot supply `contentLength`, progress may not show a total size and the PUT may use chunked encoding (depending on runtime); some storage backends require a known length.
+

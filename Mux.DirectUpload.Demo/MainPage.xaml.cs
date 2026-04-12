@@ -1,10 +1,11 @@
+using System.Linq;
 using Mux.DirectUpload.Maui;
 
 namespace Mux.DirectUpload.Demo;
 
 public partial class MainPage : ContentPage
 {
-    private string? _selectedFilePath;
+    private FileResult? _pickedVideo;
     private MuxUploadHandle? _currentUploadHandle;
 
     public MainPage()
@@ -12,34 +13,32 @@ public partial class MainPage : ContentPage
         InitializeComponent();
     }
 
-    private async void OnPickFileClicked(object? sender, EventArgs e)
+    private async void OnPickVideoClicked(object? sender, EventArgs e)
     {
         try
         {
-            var pickResult = await FilePicker.Default.PickAsync(new PickOptions
-            {
-                PickerTitle = "Pick a video file for Mux upload"
-            });
+            var results = await MediaPicker.Default.PickVideosAsync();
+            var result = results?.FirstOrDefault();
 
-            if (pickResult is null)
+            if (result is null)
                 return;
 
-            _selectedFilePath = pickResult.FullPath;
-            SelectedFileLabel.Text = $"Selected: {_selectedFilePath}";
-            StartUploadButton.IsEnabled = !string.IsNullOrWhiteSpace(_selectedFilePath);
-            StatusLabel.Text = "Status: file selected";
+            _pickedVideo = result;
+            SelectedFileLabel.Text = $"Selected: {result.FileName ?? "video"}";
+            StartUploadButton.IsEnabled = true;
+            StatusLabel.Text = "Status: video selected";
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = $"Status: file pick failed - {ex.Message}";
+            StatusLabel.Text = $"Status: pick failed - {ex.Message}";
         }
     }
 
     private async void OnStartUploadClicked(object? sender, EventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(_selectedFilePath))
+        if (_pickedVideo is null)
         {
-            StatusLabel.Text = "Status: select a video file first";
+            StatusLabel.Text = "Status: pick a video first";
             return;
         }
 
@@ -54,9 +53,11 @@ public partial class MainPage : ContentPage
             StartUploadButton.IsEnabled = false;
             CancelUploadButton.IsEnabled = true;
             PickFileButton.IsEnabled = false;
-            StatusLabel.Text = "Status: requesting authenticated upload URL...";
+            StatusLabel.Text = "Status: opening video and requesting upload URL...";
             UploadProgressBar.Progress = 0;
             ProgressLabel.Text = "Progress: 0%";
+
+            var videoStream = await _pickedVideo.OpenReadAsync();
 
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
             var authProvider = new HttpMuxAuthUrlProvider(
@@ -69,16 +70,18 @@ public partial class MainPage : ContentPage
             var progress = new Progress<MuxUploadProgress>(p =>
             {
                 var percent = p.Percent ?? 0;
+                var totalPart = p.TotalBytes.HasValue ? $"/{p.TotalBytes}" : "";
                 MainThread.BeginInvokeOnMainThread(() =>
                 {
                     UploadProgressBar.Progress = Math.Clamp(percent / 100.0, 0, 1);
-                    ProgressLabel.Text = $"Progress: {percent:F2}% ({p.BytesSent}/{p.TotalBytes})";
+                    ProgressLabel.Text = $"Progress: {percent:F2}% ({p.BytesSent}{totalPart} bytes)";
                 });
             });
 
             var (handle, uploadTask) = uploader.StartUploadAsync(
-                filePath: _selectedFilePath,
+                videoStream,
                 contentType: string.IsNullOrWhiteSpace(ContentTypeEntry.Text) ? null : ContentTypeEntry.Text.Trim(),
+                leaveOpen: false,
                 progress: progress);
 
             _currentUploadHandle = handle;
@@ -101,7 +104,7 @@ public partial class MainPage : ContentPage
             _currentUploadHandle = null;
             CancelUploadButton.IsEnabled = false;
             PickFileButton.IsEnabled = true;
-            StartUploadButton.IsEnabled = !string.IsNullOrWhiteSpace(_selectedFilePath);
+            StartUploadButton.IsEnabled = _pickedVideo is not null;
         }
     }
 

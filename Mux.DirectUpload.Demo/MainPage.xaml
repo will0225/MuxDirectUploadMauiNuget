@@ -25,8 +25,8 @@
                    Text="video/mp4" />
 
             <Button x:Name="PickFileButton"
-                    Text="1) Pick Video File"
-                    Clicked="OnPickFileClicked" />
+                    Text="1) Pick Video (MediaPicker)"
+                    Clicked="OnPickVideoClicked" />
 
             <Label x:Name="SelectedFileLabel"
                    Text="No file selected"
