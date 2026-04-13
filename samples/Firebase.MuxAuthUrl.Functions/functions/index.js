@@ -61,11 +61,10 @@ async function createMuxDirectUploadUrl() {
       .toString("base64");
 
   const payload = {
-    // cors_origin: "*",
-    // timeout: "3600s",
-    // new_asset_settings: {
-    //   playback_policy: ["public"],
-    // },
+      "new_asset_settings": {
+        "playback_policy": ["public"]
+      },
+      "cors_origin": "*"
   };
 
   const response = await fetch("https://api.mux.com/video/v1/uploads", {
