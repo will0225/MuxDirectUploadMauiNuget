@@ -71,6 +71,8 @@ public partial class MainPage : ContentPage
             var videoStream = await _pickedVideo.OpenReadAsync();
 
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
+            // Default HttpClient.Timeout is often 100s — large videos need a longer limit or uploads abort mid-stream.
+            httpClient.Timeout = TimeSpan.FromMilliseconds(-1);
             if (!string.IsNullOrWhiteSpace(firebaseToken))
                 httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", firebaseToken);
 

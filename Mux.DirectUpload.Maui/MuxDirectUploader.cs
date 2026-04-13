@@ -3,6 +3,19 @@ using System.Net.Http.Headers;
 
 namespace Mux.DirectUpload.Maui;
 
+/// <summary>
+/// Uploads video bytes to a Mux direct-upload URL obtained via <see cref="IMuxAuthUrlProvider"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="HttpClient"/> defaults to a <b>100 second</b> request timeout on many platforms. Large files take longer to upload;
+/// when that limit is hit, the connection aborts and you may see <see cref="IOException"/> inside the request body stream (e.g. while copying to the transport).
+/// </para>
+/// <para>
+/// For long uploads, set a higher limit on the same <see cref="HttpClient"/> you pass in, for example
+/// <c>httpClient.Timeout = Timeout.InfiniteTimeSpan</c> or <c>TimeSpan.FromHours(2)</c>.
+/// </para>
+/// </remarks>
 public sealed class MuxDirectUploader
 {
     private readonly HttpClient _httpClient;

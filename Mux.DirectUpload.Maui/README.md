@@ -47,6 +47,10 @@ await task;
 
 If the stream is not seekable and you cannot supply `contentLength`, progress may not show a total size and the PUT may use chunked encoding (depending on runtime); some storage backends require a known length.
 
+### Large files / long uploads
+
+`HttpClient` often defaults to a **100 second** total request timeout. Big uploads can exceed that and fail mid-stream with `IOException` on the transport. Set a longer or infinite timeout on the `HttpClient` you pass to `MuxDirectUploader`, e.g. `httpClient.Timeout = TimeSpan.FromMilliseconds(-1)` (infinite) or `TimeSpan.FromHours(2)`.
+
 ## Firebase auth URL (Bearer token)
 
 The package does **not** embed Firebase SDKs. Your app signs in with Firebase Auth and supplies the **ID token**.
