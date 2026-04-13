@@ -32,12 +32,12 @@ app.MapGet("/api/mux/direct-upload-url", async (IHttpClientFactory httpClientFac
 
     var payload = new
     {
-        cors_origin = "*",
+       /* cors_origin = "*",
         timeout = "3600s",
         new_asset_settings = new
         {
             playback_policy = new[] { "public" }
-        }
+        }*/
     };
 
     using var response = await muxClient.PostAsJsonAsync("/video/v1/uploads", payload);

@@ -61,11 +61,11 @@ async function createMuxDirectUploadUrl() {
       .toString("base64");
 
   const payload = {
-    cors_origin: "*",
-    timeout: "3600s",
-    new_asset_settings: {
-      playback_policy: ["public"],
-    },
+    // cors_origin: "*",
+    // timeout: "3600s",
+    // new_asset_settings: {
+    //   playback_policy: ["public"],
+    // },
   };
 
   const response = await fetch("https://api.mux.com/video/v1/uploads", {
@@ -89,6 +89,8 @@ async function createMuxDirectUploadUrl() {
     const detail = json?.error?.messages?.join(", ") || text || "Mux API error";
     const err = new Error(detail);
     err.status = 502;
+    err.muxStatus = response.status;
+    err.muxBody = text?.length > 2000 ? text.slice(0, 2000) + "…" : text;
     throw err;
   }
 
@@ -96,6 +98,7 @@ async function createMuxDirectUploadUrl() {
   if (!uploadUrl) {
     const err = new Error("Mux response missing data.url.");
     err.status = 502;
+    err.muxBody = text?.length > 2000 ? text.slice(0, 2000) + "…" : text;
     throw err;
   }
 
@@ -113,20 +116,27 @@ exports.getMuxDirectUploadUrl = onRequest(
         return;
       }
 
-      const auth = await verifyFirebaseBearerToken(req);
-      if (!auth.ok) {
-        res.status(auth.status).json({error: auth.message});
-        return;
-      }
+      // const auth = await verifyFirebaseBearerToken(req);
+      // if (!auth.ok) {
+      //   res.status(auth.status).json({error: auth.message});
+      //   return;
+      // }
 
       try {
         const uploadUrl = await createMuxDirectUploadUrl();
         res.status(200).json({uploadUrl});
       } catch (err) {
         logger.error("Failed to create Mux upload URL", err);
-        res.status(err.status || 500).json({
+        const body = {
           error: err.message || "Failed to create upload URL.",
-        });
+        };
+        if (err.muxStatus != null) {
+          body.muxHttpStatus = err.muxStatus;
+        }
+        if (err.muxBody != null) {
+          body.muxResponseSnippet = err.muxBody;
+        }
+        res.status(err.status || 500).json(body);
       }
     },
 );
