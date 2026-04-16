@@ -19,6 +19,13 @@
                    Placeholder="/api/mux/direct-upload-url or / for Cloud Run root"
                    Text="/api/mux/direct-upload-url" />
 
+            <Label Text="Firebase ID token (Bearer):" />
+            <Editor x:Name="FirebaseIdTokenEntry"
+                    Placeholder="Paste Firebase ID token from your app sign-in"
+                    AutoSize="TextChanges"
+                    MinimumHeightRequest="72"
+                    MaxLength="8192" />
+
             <Label Text="Optional MIME type (video/mp4):" />
             <Entry x:Name="ContentTypeEntry"
                    Placeholder="video/mp4"

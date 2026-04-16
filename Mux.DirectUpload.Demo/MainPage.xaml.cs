@@ -48,6 +48,16 @@ public partial class MainPage : ContentPage
             return;
         }
 
+        var baseUrlText = BackendBaseUrlEntry.Text?.Trim() ?? "";
+        var looksLikeFirebaseFunction = baseUrlText.Contains("cloudfunctions.net", StringComparison.OrdinalIgnoreCase)
+            || baseUrlText.Contains(".run.app", StringComparison.OrdinalIgnoreCase);
+        var firebaseToken = FirebaseIdTokenEntry.Text?.Trim();
+        if (looksLikeFirebaseFunction && string.IsNullOrWhiteSpace(firebaseToken))
+        {
+            StatusLabel.Text = "Status: paste a Firebase ID token";
+            return;
+        }
+
         try
         {
             StartUploadButton.IsEnabled = false;
@@ -63,12 +73,12 @@ public partial class MainPage : ContentPage
             // Default HttpClient.Timeout is often 100s — large videos need a longer limit or uploads abort mid-stream.
             httpClient.Timeout = TimeSpan.FromMilliseconds(-1);
 
-            var authProvider = new BasicAuthMuxAuthUrlProvider(
+            var authProvider = new BearerMuxAuthUrlProvider(
                 httpClient,
                 endpointPath: string.IsNullOrWhiteSpace(EndpointPathEntry.Text)
                     ? "/api/mux/direct-upload-url"
                     : EndpointPathEntry.Text.Trim(),
-                getCredentialsAsync: ct => Task.FromResult(("will0225", "123456")));
+                getBearerTokenAsync: ct => Task.FromResult(firebaseToken ?? string.Empty));
 
             var uploader = new MuxDirectUploader(httpClient, authProvider);
             var progress = new Progress<MuxUploadProgress>(p =>
