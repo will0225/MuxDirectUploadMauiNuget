@@ -1,5 +1,4 @@
 using System.Linq;
-using System.Net.Http.Headers;
 using Mux.DirectUpload.Maui;
 
 namespace Mux.DirectUpload.Demo;
@@ -49,16 +48,6 @@ public partial class MainPage : ContentPage
             return;
         }
 
-        var baseUrlText = BackendBaseUrlEntry.Text?.Trim() ?? "";
-        var looksLikeFirebaseFunction = baseUrlText.Contains("cloudfunctions.net", StringComparison.OrdinalIgnoreCase)
-            || baseUrlText.Contains(".run.app", StringComparison.OrdinalIgnoreCase);
-        var firebaseToken = FirebaseIdTokenEntry.Text?.Trim();
-        if (looksLikeFirebaseFunction && string.IsNullOrWhiteSpace(firebaseToken))
-        {
-            StatusLabel.Text = "Status: paste a Firebase ID token (required for Firebase auth URL)";
-            return;
-        }
-
         try
         {
             StartUploadButton.IsEnabled = false;
@@ -73,14 +62,13 @@ public partial class MainPage : ContentPage
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
             // Default HttpClient.Timeout is often 100s — large videos need a longer limit or uploads abort mid-stream.
             httpClient.Timeout = TimeSpan.FromMilliseconds(-1);
-            if (!string.IsNullOrWhiteSpace(firebaseToken))
-                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", firebaseToken);
 
-            var authProvider = new HttpMuxAuthUrlProvider(
+            var authProvider = new BasicAuthMuxAuthUrlProvider(
                 httpClient,
                 endpointPath: string.IsNullOrWhiteSpace(EndpointPathEntry.Text)
                     ? "/api/mux/direct-upload-url"
-                    : EndpointPathEntry.Text.Trim());
+                    : EndpointPathEntry.Text.Trim(),
+                getCredentialsAsync: ct => Task.FromResult(("will0225", "123456")));
 
             var uploader = new MuxDirectUploader(httpClient, authProvider);
             var progress = new Progress<MuxUploadProgress>(p =>
