@@ -7,26 +7,8 @@ setGlobalOptions({region: "us-central1"});
 
 const muxTokenId = defineSecret("MUX_TOKEN_ID");
 const muxTokenSecret = defineSecret("MUX_TOKEN_SECRET");
-
-/**
- * Lazy-load firebase-admin so deploy-time code discovery does not block on ADC /
- * metadata during "firebase deploy" (avoids "Timeout after 10000" while analyzing).
- */
-function getAuth() {
-  const admin = require("firebase-admin");
-  if (!admin.apps.length) {
-    let projectId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
-    if (!projectId && process.env.FIREBASE_CONFIG) {
-      try {
-        projectId = JSON.parse(process.env.FIREBASE_CONFIG).projectId;
-      } catch {
-        // ignore
-      }
-    }
-    admin.initializeApp(projectId ? {projectId} : {});
-  }
-  return admin.auth();
-}
+const appUsername = defineSecret("APP_USERNAME");
+const appPassword = defineSecret("APP_PASSWORD");
 
 function readMuxConfig() {
   const tokenId = muxTokenId.value();
@@ -39,19 +21,43 @@ function readMuxConfig() {
   return {tokenId, tokenSecret};
 }
 
-async function verifyFirebaseBearerToken(req) {
+function readAppCredentials() {
+  const username = appUsername.value();
+  const password = appPassword.value();
+
+  if (!username || !password) {
+    throw new Error("Missing APP_USERNAME or APP_PASSWORD secrets.");
+  }
+
+  return {username, password};
+}
+
+function verifyBasicCredentials(req) {
   const authHeader = req.headers.authorization || "";
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  const match = authHeader.match(/^Basic\s+(.+)$/i);
   if (!match) {
-    return {ok: false, status: 401, message: "Missing Bearer token."};
+    return {ok: false, status: 401, message: "Missing Basic authorization header."};
   }
 
   try {
-    const decoded = await getAuth().verifyIdToken(match[1]);
-    return {ok: true, uid: decoded.uid};
+    const decoded = Buffer.from(match[1], "base64").toString("utf8");
+    const separatorIndex = decoded.indexOf(":");
+    if (separatorIndex < 0) {
+      return {ok: false, status: 401, message: "Invalid Basic authorization header."};
+    }
+
+    const providedUsername = decoded.slice(0, separatorIndex);
+    const providedPassword = decoded.slice(separatorIndex + 1);
+    const expected = readAppCredentials();
+
+    if (providedUsername !== expected.username || providedPassword !== expected.password) {
+      return {ok: false, status: 401, message: "Invalid username or password."};
+    }
+
+    return {ok: true};
   } catch (err) {
-    logger.warn("Invalid Firebase token", err);
-    return {ok: false, status: 401, message: "Invalid Firebase token."};
+    logger.warn("Invalid basic credentials", err);
+    return {ok: false, status: 401, message: "Invalid Basic authorization header."};
   }
 }
 
@@ -61,10 +67,10 @@ async function createMuxDirectUploadUrl() {
       .toString("base64");
 
   const payload = {
-      "new_asset_settings": {
-        "playback_policy": ["public"]
-      },
-      "cors_origin": "*"
+    "new_asset_settings": {
+      "playback_policy": ["public"],
+    },
+    "cors_origin": "*",
   };
 
   const response = await fetch("https://api.mux.com/video/v1/uploads", {
@@ -107,7 +113,7 @@ async function createMuxDirectUploadUrl() {
 exports.getMuxDirectUploadUrl = onRequest(
     {
       cors: true,
-      secrets: [muxTokenId, muxTokenSecret],
+      secrets: [muxTokenId, muxTokenSecret, appUsername, appPassword],
     },
     async (req, res) => {
       if (req.method !== "GET") {
@@ -115,11 +121,11 @@ exports.getMuxDirectUploadUrl = onRequest(
         return;
       }
 
-      // const auth = await verifyFirebaseBearerToken(req);
-      // if (!auth.ok) {
-      //   res.status(auth.status).json({error: auth.message});
-      //   return;
-      // }
+      const auth = verifyBasicCredentials(req);
+      if (!auth.ok) {
+        res.status(auth.status).json({error: auth.message});
+        return;
+      }
 
       try {
         const uploadUrl = await createMuxDirectUploadUrl();

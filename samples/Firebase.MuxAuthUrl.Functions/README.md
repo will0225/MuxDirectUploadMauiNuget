@@ -4,7 +4,7 @@ This sample exposes a Firebase HTTPS function that returns a Mux Direct Upload U
 
 - Endpoint: `getMuxDirectUploadUrl` (GET)
 - Response: `{ "uploadUrl": "https://storage.googleapis.com/..." }`
-- Auth: requires a valid Firebase ID token in `Authorization: Bearer <token>`
+- Auth: requires predefined app credentials in `Authorization: Basic <base64(username:password)>`
 
 ## 1) Prerequisites
 
@@ -20,11 +20,13 @@ cd functions
 npm install
 ```
 
-## 3) Set Mux secrets
+## 3) Set secrets
 
 ```bash
 firebase functions:secrets:set MUX_TOKEN_ID
 firebase functions:secrets:set MUX_TOKEN_SECRET
+firebase functions:secrets:set APP_USERNAME
+firebase functions:secrets:set APP_PASSWORD
 ```
 
 ## 4) Deploy
@@ -61,9 +63,11 @@ Use your deployed function URL as the `HttpClient.BaseAddress` in your MAUI app.
 
 If your URL includes a path segment such as `/getMuxDirectUploadUrl`, use that as `endpointPath` instead.
 
-Your MAUI request must include the Firebase ID token:
+Your MAUI request must include the app username/password using Basic auth:
 
-`Authorization: Bearer <firebase-id-token>`
+`Authorization: Basic <base64(username:password)>`
+
+With this repo's package, use `BasicAuthMuxAuthUrlProvider`.
 
 ## Deploy: "Timeout after 10000" / "Cannot determine backend specification"
 
@@ -80,7 +84,7 @@ This happens while the Firebase CLI analyzes your function code. Try in order:
 
 4. **On Windows**, if deploy keeps timing out, run the same command from **WSL2** or **Git Bash**, or another machine; some environments block or slow the Node subprocess the CLI uses for code discovery.
 
-5. Confirm **Mux secrets exist** in Secret Manager (`MUX_TOKEN_ID`, `MUX_TOKEN_SECRET`) and the project is on the **Blaze** plan.
+5. Confirm required secrets exist in Secret Manager: `MUX_TOKEN_ID`, `MUX_TOKEN_SECRET`, `APP_USERNAME`, `APP_PASSWORD`.
 
 ## Notes
 

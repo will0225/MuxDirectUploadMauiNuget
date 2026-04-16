@@ -51,11 +51,27 @@ If the stream is not seekable and you cannot supply `contentLength`, progress ma
 
 `HttpClient` often defaults to a **100 second** total request timeout. Big uploads can exceed that and fail mid-stream with `IOException` on the transport. Set a longer or infinite timeout on the `HttpClient` you pass to `MuxDirectUploader`, e.g. `httpClient.Timeout = TimeSpan.FromMilliseconds(-1)` (infinite) or `TimeSpan.FromHours(2)`.
 
-## Firebase auth URL (Bearer token)
+## Auth URL options
 
-The package does **not** embed Firebase SDKs. Your app signs in with Firebase Auth and supplies the **ID token**.
+The package does not require Firebase specifically. Your app only needs an auth-url provider that can call your backend and return `{ "uploadUrl": "..." }`.
 
-Use **`BearerMuxAuthUrlProvider`**: it adds `Authorization: Bearer` only to the auth-url **GET**, not to the Mux **PUT** (avoid putting `DefaultRequestHeaders.Authorization` on the same `HttpClient` used for upload).
+### Basic auth username/password
+
+Use **`BasicAuthMuxAuthUrlProvider`** when your backend expects a predefined username/password via HTTP Basic auth.
+
+```csharp
+var http = new HttpClient { BaseAddress = new Uri("https://your-auth-url.example.com") };
+var auth = new BasicAuthMuxAuthUrlProvider(
+    http,
+    endpointPath: "/getMuxDirectUploadUrl",
+    getCredentialsAsync: ct => Task.FromResult(("your-username", "your-password")));
+
+var uploader = new MuxDirectUploader(http, auth);
+```
+
+### Firebase Bearer token
+
+If your backend uses Firebase Auth, use **`BearerMuxAuthUrlProvider`**. Your app signs in with Firebase Auth and supplies the ID token.
 
 ```csharp
 var http = new HttpClient { BaseAddress = new Uri("https://us-central1-PROJECT.cloudfunctions.net") };
@@ -68,6 +84,4 @@ var uploader = new MuxDirectUploader(http, auth);
 ```
 
 Replace `GetIdTokenAsync` with your Firebase user API. For **token refresh**, return a fresh token each call (Firebase SDK usually handles that when you call `GetIdTokenAsync(true)` if needed).
-
-You **cannot** “pass Firebase automatically” from the Cloud Function alone: the app must identify the user; the function only verifies the JWT. Alternatives (API keys in the app, unauthenticated endpoints) are weaker and not recommended.
 
