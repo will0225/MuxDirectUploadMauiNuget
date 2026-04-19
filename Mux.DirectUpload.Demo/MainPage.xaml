@@ -19,6 +19,15 @@
                    Placeholder="/api/mux/direct-upload-url or / for Cloud Run root"
                    Text="/api/mux/direct-upload-url" />
 
+            <HorizontalStackLayout Spacing="12">
+                <Switch x:Name="UseWebhookStatusSwitch"
+                        IsToggled="True"
+                        VerticalOptions="Center" />
+                <Label Text="After PUT: poll Firestore webhook snapshot (getMuxWebhookStatus). Turn off to use Mux GET upload (getMuxUploadStatus) instead."
+                       VerticalOptions="Center"
+                       LineBreakMode="WordWrap" />
+            </HorizontalStackLayout>
+
             <Label Text="Firebase ID token (Bearer):" />
             <Editor x:Name="FirebaseIdTokenEntry"
                     Placeholder="Paste Firebase ID token from your app sign-in"
@@ -30,6 +39,20 @@
             <Entry x:Name="ContentTypeEntry"
                    Placeholder="video/mp4"
                    Text="video/mp4" />
+
+            <Label Text="Optional: Creator ID (query creatorId):" />
+            <Entry x:Name="CreatorIdEntry"
+                   Placeholder="e.g. channel or studio id" />
+
+            <Label Text="Optional: External ID (query externalId):" />
+            <Entry x:Name="ExternalIdEntry"
+                   Placeholder="e.g. your CMS record id" />
+
+            <Label Text="Optional: Asset metadata (JSON object, string values):" />
+            <Editor x:Name="MetadataJsonEntry"
+                    Placeholder="JSON object with string values, e.g. passthrough and app_tenant keys"
+                    AutoSize="TextChanges"
+                    MinimumHeightRequest="72" />
 
             <Button x:Name="PickFileButton"
                     Text="1) Pick Video (MediaPicker)"
@@ -58,6 +81,91 @@
             <Label x:Name="StatusLabel"
                    Text="Status: idle"
                    LineBreakMode="WordWrap" />
+
+            <Label Text="Last result"
+                   Margin="0,16,0,0"
+                   FontSize="16"
+                   FontAttributes="Bold" />
+
+            <Label Text="Auth response (create direct upload JSON)"
+                   FontAttributes="Bold"
+                   FontSize="13" />
+            <Label x:Name="ResultAuthPutUriLabel"
+                   Text="—"
+                   LineBreakMode="CharacterWrap"
+                   FontSize="12" />
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="uploadId:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultAuthUploadIdLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="assetId:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultAuthAssetIdLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="playbackId:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultAuthPlaybackIdLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+
+            <Label Text="Details after PUT (webhook snapshot or Mux GET upload)"
+                   Margin="0,12,0,0"
+                   FontAttributes="Bold"
+                   FontSize="13" />
+            <Label x:Name="ResultMuxGetHintLabel"
+                   Text="—"
+                   FontSize="11"
+                   TextColor="Gray"
+                   LineBreakMode="WordWrap" />
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="id:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxIdLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="status:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxStatusLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="lastEvent:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxLastEventTypeLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="asset_id:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxAssetIdLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <Label Text="new_asset_settings echo (your meta / passthrough)"
+                   Margin="0,8,0,0"
+                   FontAttributes="Bold"
+                   FontSize="12" />
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="passthrough:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxNasPassthroughLabel" FontSize="12" LineBreakMode="WordWrap" />
+            </HorizontalStackLayout>
+            <Label Text="meta (upload echo):"
+                   FontSize="12" />
+            <Label x:Name="ResultMuxNasMetaLabel"
+                   FontSize="11"
+                   LineBreakMode="WordWrap" />
+            <Label Text="Merged from Asset GET (playback lives here)"
+                   Margin="0,8,0,0"
+                   FontAttributes="Bold"
+                   FontSize="12" />
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="playbackId:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxPlaybackIdLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="asset_status:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxAssetStatusLabel" FontSize="12" LineBreakMode="CharacterWrap" />
+            </HorizontalStackLayout>
+            <Label Text="asset_meta (from asset):"
+                   FontSize="12" />
+            <Label x:Name="ResultMuxAssetMetaLabel"
+                   FontSize="11"
+                   LineBreakMode="WordWrap" />
+            <HorizontalStackLayout Spacing="8">
+                <Label Text="error:" WidthRequest="88" FontSize="12" />
+                <Label x:Name="ResultMuxErrorLabel" FontSize="12" LineBreakMode="WordWrap" />
+            </HorizontalStackLayout>
         </VerticalStackLayout>
     </ScrollView>
 </ContentPage>

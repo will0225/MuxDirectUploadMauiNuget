@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Text.Json;
 using Mux.DirectUpload.Maui;
 
 namespace Mux.DirectUpload.Demo;
@@ -11,6 +12,132 @@ public partial class MainPage : ContentPage
     public MainPage()
     {
         InitializeComponent();
+        ClearResultLabels();
+    }
+
+    private void ClearResultLabels()
+    {
+        ResultAuthPutUriLabel.Text = "—";
+        ResultAuthUploadIdLabel.Text = "—";
+        ResultAuthAssetIdLabel.Text = "—";
+        ResultAuthPlaybackIdLabel.Text = "—";
+        ResultMuxGetHintLabel.Text = "Run an upload to see webhook snapshot or Mux GET details here.";
+        ResultMuxIdLabel.Text = "—";
+        ResultMuxStatusLabel.Text = "—";
+        ResultMuxLastEventTypeLabel.Text = "—";
+        ResultMuxAssetIdLabel.Text = "—";
+        ResultMuxNasPassthroughLabel.Text = "—";
+        ResultMuxNasMetaLabel.Text = "—";
+        ResultMuxPlaybackIdLabel.Text = "—";
+        ResultMuxAssetStatusLabel.Text = "—";
+        ResultMuxAssetMetaLabel.Text = "—";
+        ResultMuxErrorLabel.Text = "—";
+    }
+
+    private void ApplyOutcomeToLabels(MuxUploadOutcome outcome, bool fetchDetailsAfterPut, bool useWebhookStatus)
+    {
+        var a = outcome.Auth;
+        ResultAuthPutUriLabel.Text = TruncateForUi(a.PutUri.ToString(), 120);
+        ResultAuthUploadIdLabel.Text = a.UploadId ?? "—";
+        ResultAuthAssetIdLabel.Text = a.AssetId ?? "—";
+        ResultAuthPlaybackIdLabel.Text = a.PlaybackId ?? "—";
+
+        if (!fetchDetailsAfterPut)
+        {
+            ResultMuxGetHintLabel.Text =
+                "Details fetch not used (enable for Firebase-style base URL + ID token).";
+            ResultMuxIdLabel.Text = "—";
+            ResultMuxStatusLabel.Text = "—";
+            ResultMuxLastEventTypeLabel.Text = "—";
+            ResultMuxAssetIdLabel.Text = "—";
+            ResultMuxNasPassthroughLabel.Text = "—";
+            ResultMuxNasMetaLabel.Text = "—";
+            ResultMuxPlaybackIdLabel.Text = "—";
+            ResultMuxAssetStatusLabel.Text = "—";
+            ResultMuxAssetMetaLabel.Text = "—";
+            ResultMuxErrorLabel.Text = "—";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(a.UploadId))
+        {
+            ResultMuxGetHintLabel.Text =
+                "Skipped: auth response had no uploadId — deploy a backend that returns uploadId next to uploadUrl.";
+            ResultMuxIdLabel.Text = "—";
+            ResultMuxStatusLabel.Text = "—";
+            ResultMuxLastEventTypeLabel.Text = "—";
+            ResultMuxAssetIdLabel.Text = "—";
+            ResultMuxNasPassthroughLabel.Text = "—";
+            ResultMuxNasMetaLabel.Text = "—";
+            ResultMuxPlaybackIdLabel.Text = "—";
+            ResultMuxAssetStatusLabel.Text = "—";
+            ResultMuxAssetMetaLabel.Text = "—";
+            ResultMuxErrorLabel.Text = "—";
+            return;
+        }
+
+        if (outcome.UploadDetails is null)
+        {
+            ResultMuxGetHintLabel.Text = useWebhookStatus
+                ? "GET getMuxWebhookStatus failed or timed out (check token, deploy function, Mux webhook → Firestore, or 404 until first event)."
+                : "GET getMuxUploadStatus returned no body or failed (check token, deploy getMuxUploadStatus, or 404).";
+            ResultMuxIdLabel.Text = "—";
+            ResultMuxStatusLabel.Text = "—";
+            ResultMuxLastEventTypeLabel.Text = "—";
+            ResultMuxAssetIdLabel.Text = "—";
+            ResultMuxNasPassthroughLabel.Text = "—";
+            ResultMuxNasMetaLabel.Text = "—";
+            ResultMuxPlaybackIdLabel.Text = "—";
+            ResultMuxAssetStatusLabel.Text = "—";
+            ResultMuxAssetMetaLabel.Text = "—";
+            ResultMuxErrorLabel.Text = "—";
+            return;
+        }
+
+        var d = outcome.UploadDetails;
+        var hint = useWebhookStatus
+            ? "Loaded via HttpMuxWebhookStatusProvider → getMuxWebhookStatus (Firestore; Mux webhook must be configured)."
+            : "Loaded via HttpMuxUploadDetailsProvider → getMuxUploadStatus (+ asset merge for playback).";
+        if (!useWebhookStatus && !string.IsNullOrEmpty(d.AssetId) && string.IsNullOrEmpty(d.PlaybackId))
+        {
+            hint += " Playback id may appear after asset_status is ready — retry or wait.";
+        }
+
+        ResultMuxGetHintLabel.Text = hint;
+        ResultMuxIdLabel.Text = d.Id ?? "—";
+        ResultMuxStatusLabel.Text = d.Status ?? "—";
+        ResultMuxLastEventTypeLabel.Text = d.LastEventType ?? "—";
+        ResultMuxAssetIdLabel.Text = d.AssetId ?? "—";
+
+        var nas = d.NewAssetSettings;
+        ResultMuxNasPassthroughLabel.Text = nas?.Passthrough ?? "—";
+        ResultMuxNasMetaLabel.Text = FormatStringDictionary(nas?.Meta);
+
+        ResultMuxPlaybackIdLabel.Text = d.PlaybackId ?? "—";
+        ResultMuxAssetStatusLabel.Text = d.AssetStatus ?? "—";
+        ResultMuxAssetMetaLabel.Text = FormatStringDictionary(d.AssetMeta);
+
+        if (d.Error is { } err)
+        {
+            var parts = new[] { err.Type, err.Message }.Where(s => !string.IsNullOrWhiteSpace(s));
+            ResultMuxErrorLabel.Text = string.Join(" — ", parts);
+            if (string.IsNullOrWhiteSpace(ResultMuxErrorLabel.Text))
+                ResultMuxErrorLabel.Text = "(error object present)";
+        }
+        else
+        {
+            ResultMuxErrorLabel.Text = "—";
+        }
+    }
+
+    private static string TruncateForUi(string s, int maxLen) =>
+        s.Length <= maxLen ? s : s[..maxLen] + "…";
+
+    private static string FormatStringDictionary(IReadOnlyDictionary<string, string>? map)
+    {
+        if (map is null || map.Count == 0)
+            return "—";
+        return string.Join("\n", map.Select(kv => $"{kv.Key}: {kv.Value}"));
     }
 
     private async void OnPickVideoClicked(object? sender, EventArgs e)
@@ -49,8 +176,9 @@ public partial class MainPage : ContentPage
         }
 
         var baseUrlText = BackendBaseUrlEntry.Text?.Trim() ?? "";
-        var looksLikeFirebaseFunction = baseUrlText.Contains("cloudfunctions.net", StringComparison.OrdinalIgnoreCase)
-            || baseUrlText.Contains(".run.app", StringComparison.OrdinalIgnoreCase);
+        /*var looksLikeFirebaseFunction = baseUrlText.Contains("cloudfunctions.net", StringComparison.OrdinalIgnoreCase)
+            || baseUrlText.Contains(".run.app", StringComparison.OrdinalIgnoreCase);*/
+        var looksLikeFirebaseFunction = true;
         var firebaseToken = FirebaseIdTokenEntry.Text?.Trim();
         if (looksLikeFirebaseFunction && string.IsNullOrWhiteSpace(firebaseToken))
         {
@@ -63,6 +191,7 @@ public partial class MainPage : ContentPage
             StartUploadButton.IsEnabled = false;
             CancelUploadButton.IsEnabled = true;
             PickFileButton.IsEnabled = false;
+            MainThread.BeginInvokeOnMainThread(ClearResultLabels);
             StatusLabel.Text = "Status: opening video and requesting upload URL...";
             UploadProgressBar.Progress = 0;
             ProgressLabel.Text = "Progress: 0%";
@@ -76,11 +205,32 @@ public partial class MainPage : ContentPage
             var authProvider = new BearerMuxAuthUrlProvider(
                 httpClient,
                 endpointPath: string.IsNullOrWhiteSpace(EndpointPathEntry.Text)
-                    ? "/api/mux/direct-upload-url"
+                    ? "/muxpackageauthapi/us-central1/getMuxDirectUploadUrl"
                     : EndpointPathEntry.Text.Trim(),
                 getBearerTokenAsync: ct => Task.FromResult(firebaseToken ?? string.Empty));
 
-            var uploader = new MuxDirectUploader(httpClient, authProvider);
+            var fetchDetailsAfterPut = looksLikeFirebaseFunction && !string.IsNullOrWhiteSpace(firebaseToken);
+            var useWebhookStatus = UseWebhookStatusSwitch.IsToggled;
+            IMuxUploadDetailsProvider? detailsProvider = null;
+            if (fetchDetailsAfterPut)
+            {
+                if (useWebhookStatus)
+                {
+                    detailsProvider = new HttpMuxWebhookStatusProvider(
+                        httpClient,
+                        endpointPathFormat: "/muxpackageauthapi/us-central1/getMuxWebhookStatus?uploadId={0}",
+                        getBearerTokenAsync: ct => Task.FromResult(firebaseToken ?? string.Empty));
+                }
+                else
+                {
+                    detailsProvider = new HttpMuxUploadDetailsProvider(
+                        httpClient,
+                        endpointPathFormat: "/muxpackageauthapi/us-central1/getMuxUploadStatus?uploadId={0}",
+                        getBearerTokenAsync: ct => Task.FromResult(firebaseToken ?? string.Empty));
+                }
+            }
+
+            var uploader = new MuxDirectUploader(httpClient, authProvider, detailsProvider);
             var progress = new Progress<MuxUploadProgress>(p =>
             {
                 var percent = p.Percent ?? 0;
@@ -92,18 +242,51 @@ public partial class MainPage : ContentPage
                 });
             });
 
+            MuxAuthRequestContext? authContext = null;
+            var c = CreatorIdEntry.Text?.Trim();
+            var ex = ExternalIdEntry.Text?.Trim();
+            var metaJson = MetadataJsonEntry.Text?.Trim();
+            IReadOnlyDictionary<string, string>? metadata = null;
+            if (!string.IsNullOrWhiteSpace(metaJson))
+            {
+                try
+                {
+                    metadata = JsonSerializer.Deserialize<Dictionary<string, string>>(metaJson);
+                }
+                catch (JsonException jex)
+                {
+                    StatusLabel.Text = $"Status: metadata JSON invalid - {jex.Message}";
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(c) || !string.IsNullOrEmpty(ex) || metadata is { Count: > 0 })
+            {
+                authContext = new MuxAuthRequestContext
+                {
+                    CreatorId = string.IsNullOrEmpty(c) ? null : c,
+                    ExternalId = string.IsNullOrEmpty(ex) ? null : ex,
+                    Metadata = metadata,
+                };
+            }
+
             var (handle, uploadTask) = uploader.StartUploadAsync(
                 videoStream,
                 contentType: string.IsNullOrWhiteSpace(ContentTypeEntry.Text) ? null : ContentTypeEntry.Text.Trim(),
                 leaveOpen: false,
-                progress: progress);
+                progress: progress,
+                authContext: authContext);
 
             _currentUploadHandle = handle;
             StatusLabel.Text = "Status: upload started";
 
-            await uploadTask;
+            var outcome = await uploadTask;
 
-            StatusLabel.Text = "Status: upload completed";
+            MainThread.BeginInvokeOnMainThread(() => ApplyOutcomeToLabels(outcome, fetchDetailsAfterPut, useWebhookStatus));
+
+            var a = outcome.Auth;
+            StatusLabel.Text =
+                $"Status: upload completed — auth uploadId={a.UploadId ?? "—"}, Mux GET status={outcome.UploadDetails?.Status ?? "n/a"}";
         }
         catch (OperationCanceledException)
         {

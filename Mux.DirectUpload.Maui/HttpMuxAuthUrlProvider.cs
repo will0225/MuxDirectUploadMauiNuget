@@ -13,18 +13,24 @@ public sealed class HttpMuxAuthUrlProvider : IMuxAuthUrlProvider
         _endpointPath = endpointPath ?? throw new ArgumentNullException(nameof(endpointPath));
     }
 
-    public async Task<Uri> GetUploadUrlAsync(CancellationToken cancellationToken = default)
+    public async Task<MuxAuthUrlResult> GetUploadUrlAsync(
+        MuxAuthRequestContext? authContext = null,
+        CancellationToken cancellationToken = default)
     {
-        var resp = await _httpClient.GetFromJsonAsync(
-                       _endpointPath,
+        var path = MuxAuthRequestContext.AppendToEndpointPath(_endpointPath, authContext);
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        MuxAuthRequestContext.ApplyHeaders(request, authContext);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        var resp = await response.Content.ReadFromJsonAsync(
                        DirectUploadUrlJsonContext.Default.DirectUploadUrlResponse,
                        cancellationToken)
+                   .ConfigureAwait(false)
                    ?? throw new InvalidOperationException("Mux upload URL response was null.");
 
-        if (string.IsNullOrWhiteSpace(resp.UploadUrl))
-            throw new InvalidOperationException("Mux upload URL response did not contain UploadUrl.");
-
-        return new Uri(resp.UploadUrl, UriKind.Absolute);
+        return DirectUploadUrlResponseMapper.ToMuxAuthUrlResult(resp);
     }
 }
 

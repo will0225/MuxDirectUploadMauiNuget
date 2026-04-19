@@ -30,14 +30,18 @@ public sealed class BearerMuxAuthUrlProvider : IMuxAuthUrlProvider
         _getBearerTokenAsync = getBearerTokenAsync ?? throw new ArgumentNullException(nameof(getBearerTokenAsync));
     }
 
-    public async Task<Uri> GetUploadUrlAsync(CancellationToken cancellationToken = default)
+    public async Task<MuxAuthUrlResult> GetUploadUrlAsync(
+        MuxAuthRequestContext? authContext = null,
+        CancellationToken cancellationToken = default)
     {
         var token = await _getBearerTokenAsync(cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(token))
             throw new InvalidOperationException("Bearer token is null or empty.");
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, _endpointPath);
+        var path = MuxAuthRequestContext.AppendToEndpointPath(_endpointPath, authContext);
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
+        MuxAuthRequestContext.ApplyHeaders(request, authContext);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -48,9 +52,6 @@ public sealed class BearerMuxAuthUrlProvider : IMuxAuthUrlProvider
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException("Mux upload URL response was null.");
 
-        if (string.IsNullOrWhiteSpace(resp.UploadUrl))
-            throw new InvalidOperationException("Mux upload URL response did not contain UploadUrl.");
-
-        return new Uri(resp.UploadUrl, UriKind.Absolute);
+        return DirectUploadUrlResponseMapper.ToMuxAuthUrlResult(resp);
     }
 }

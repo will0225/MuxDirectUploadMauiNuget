@@ -24,7 +24,9 @@ public sealed class BasicAuthMuxAuthUrlProvider : IMuxAuthUrlProvider
         _getCredentialsAsync = getCredentialsAsync ?? throw new ArgumentNullException(nameof(getCredentialsAsync));
     }
 
-    public async Task<Uri> GetUploadUrlAsync(CancellationToken cancellationToken = default)
+    public async Task<MuxAuthUrlResult> GetUploadUrlAsync(
+        MuxAuthRequestContext? authContext = null,
+        CancellationToken cancellationToken = default)
     {
         var credentials = await _getCredentialsAsync(cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(credentials.Username) || string.IsNullOrWhiteSpace(credentials.Password))
@@ -33,8 +35,10 @@ public sealed class BasicAuthMuxAuthUrlProvider : IMuxAuthUrlProvider
         var basic = Convert.ToBase64String(
             System.Text.Encoding.UTF8.GetBytes($"{credentials.Username}:{credentials.Password}"));
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, _endpointPath);
+        var path = MuxAuthRequestContext.AppendToEndpointPath(_endpointPath, authContext);
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", basic);
+        MuxAuthRequestContext.ApplyHeaders(request, authContext);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -45,9 +49,6 @@ public sealed class BasicAuthMuxAuthUrlProvider : IMuxAuthUrlProvider
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException("Mux upload URL response was null.");
 
-        if (string.IsNullOrWhiteSpace(resp.UploadUrl))
-            throw new InvalidOperationException("Mux upload URL response did not contain UploadUrl.");
-
-        return new Uri(resp.UploadUrl, UriKind.Absolute);
+        return DirectUploadUrlResponseMapper.ToMuxAuthUrlResult(resp);
     }
 }
