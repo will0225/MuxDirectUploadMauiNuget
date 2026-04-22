@@ -31,7 +31,20 @@ firebase functions:secrets:set MUX_TOKEN_SECRET
 firebase functions:secrets:set MUX_WEBHOOK_SECRET
 ```
 
-Use the **signing secret** from [Mux → Webhooks](https://dashboard.mux.com/settings/webhooks) for `MUX_WEBHOOK_SECRET` (one secret per webhook URL). Enable **Firestore** (Native mode) in the Firebase project; webhook updates go to collection `muxUploadWebhook`.
+Use the **signing secret** from [Mux → Webhooks](https://dashboard.mux.com/settings/webhooks) for `MUX_WEBHOOK_SECRET` (one secret per webhook URL).
+
+### Separate Firestore database for Mux (recommended)
+
+If your project already uses the **default** Firestore database for live app data, **do not** store Mux webhook rows there. Create a **second** Firestore database in the same project ([Firestore → Databases → Create database](https://firebase.google.com/docs/firestore/manage-databases)), pick an ID such as `mux-webhook`, and keep your existing data in `(default)`.
+
+Set the Cloud Functions parameter **`FIRESTORE_MUX_DATABASE_ID`** to that database ID so only `muxWebhook` / `getMuxWebhookStatus` use it. In the `functions/` folder, add a `.env` file (do not commit secrets; this is a non-secret id):
+
+```bash
+# functions/.env
+FIRESTORE_MUX_DATABASE_ID=mux-webhook
+```
+
+If you omit this parameter or leave it empty, the sample falls back to the **`(default)`** database (collection `muxUploadWebhook` there).
 
 After deploy, register the webhook URL in Mux, for example:
 

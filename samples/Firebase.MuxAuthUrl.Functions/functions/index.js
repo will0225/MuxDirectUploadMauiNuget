@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const {setGlobalOptions} = require("firebase-functions/v2");
 const {onRequest} = require("firebase-functions/v2/https");
-const {defineSecret} = require("firebase-functions/params");
+const {defineSecret, defineString} = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
 
 setGlobalOptions({region: "us-central1"});
@@ -9,6 +9,12 @@ setGlobalOptions({region: "us-central1"});
 const muxTokenId = defineSecret("MUX_TOKEN_ID");
 const muxTokenSecret = defineSecret("MUX_TOKEN_SECRET");
 const muxWebhookSecret = defineSecret("MUX_WEBHOOK_SECRET");
+
+/** Firestore database ID for Mux webhook docs only (create a second DB in console). Empty = (default). */
+const muxFirestoreDatabaseId = defineString("FIRESTORE_MUX_DATABASE_ID", {
+  default: "",
+  description: "Named Firestore database for muxUploadWebhook; omit or empty for (default).",
+});
 
 function readMuxConfig() {
   const tokenId = muxTokenId.value();
@@ -41,8 +47,21 @@ function getAuth() {
   return ensureAdminApp().auth();
 }
 
-function getFirestore() {
-  return ensureAdminApp().firestore();
+/**
+ * Firestore used only for Mux webhook state (`muxUploadWebhook`).
+ * Set param FIRESTORE_MUX_DATABASE_ID to a dedicated database ID so Mux data never touches your main DB.
+ */
+function getMuxFirestore() {
+  ensureAdminApp();
+  const {getApp} = require("firebase-admin/app");
+  const {getFirestore} = require("firebase-admin/firestore");
+  const app = getApp();
+  const raw = muxFirestoreDatabaseId.value();
+  const id = typeof raw === "string" ? raw.trim() : "";
+  if (!id || id === "(default)") {
+    return getFirestore(app);
+  }
+  return getFirestore(app, id);
 }
 
 /** @see https://docs.mux.com/docs/core/verify-webhook-signatures */
@@ -123,7 +142,7 @@ function extractMuxWebhookFields(payload) {
 }
 
 async function persistMuxWebhookDoc(fields) {
-  const admin = ensureAdminApp();
+  const {FieldValue} = require("firebase-admin/firestore");
   const {type, uploadId, assetId, playbackId, playbackIds, assetStatus, passthrough} = fields;
   let docId = uploadId && String(uploadId).trim();
   if (!docId && assetId) {
@@ -133,14 +152,14 @@ async function persistMuxWebhookDoc(fields) {
     docId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   }
 
-  const ref = getFirestore().collection("muxUploadWebhook").doc(docId);
+  const ref = getMuxFirestore().collection("muxUploadWebhook").doc(docId);
   const playbackIdsPlain = playbackIds ?
     playbackIds.map((p) => (p && typeof p === "object" ? {...p} : p)) :
     null;
 
   await ref.set(
       {
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
         lastEventType: type,
         uploadId: uploadId || null,
         assetId: assetId || null,
@@ -382,11 +401,11 @@ exports.getMuxDirectUploadUrl = onRequest(
         return;
       }
 
-      // const auth = await verifyFirebaseIdToken(req);
-      // if (!auth.ok) {
-      //   res.status(auth.status).json({error: auth.message});
-      //   return;
-      // }
+      const auth = await verifyFirebaseIdToken(req);
+      if (!auth.ok) {
+        res.status(auth.status).json({error: auth.message});
+        return;
+      }
 
       try {
         const ctx = readAuthContext(req);
@@ -524,11 +543,11 @@ exports.getMuxUploadStatus = onRequest(
         return;
       }
 
-      // const auth = await verifyFirebaseIdToken(req);
-      // if (!auth.ok) {
-      //   res.status(auth.status).json({error: auth.message});
-      //   return;
-      // }
+      const auth = await verifyFirebaseIdToken(req);
+      if (!auth.ok) {
+        res.status(auth.status).json({error: auth.message});
+        return;
+      }
 
       const uploadId = req.query.uploadId || req.query.upload_id;
       if (!uploadId || !String(uploadId).trim()) {
@@ -578,6 +597,7 @@ exports.muxWebhook = onRequest(
     {
       secrets: [muxWebhookSecret],
       invoker: "public",
+      params: [muxFirestoreDatabaseId],
     },
     async (req, res) => {
       if (req.method !== "POST") {
@@ -627,6 +647,7 @@ exports.muxWebhook = onRequest(
 exports.getMuxWebhookStatus = onRequest(
     {
       cors: true,
+      params: [muxFirestoreDatabaseId],
     },
     async (req, res) => {
       if (req.method !== "GET") {
@@ -642,7 +663,7 @@ exports.getMuxWebhookStatus = onRequest(
         return;
       }
       try {
-        const db = getFirestore();
+        const db = getMuxFirestore();
         let snap = null;
         if (uid) {
           snap = await db.collection("muxUploadWebhook").doc(uid).get();
