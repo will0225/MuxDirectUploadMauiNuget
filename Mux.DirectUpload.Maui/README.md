@@ -74,6 +74,27 @@ await task;
 
 If the stream is not seekable and you cannot supply `contentLength`, progress may not show a total size and the PUT may use chunked encoding (depending on runtime); some storage backends require a known length.
 
+### Pause / resume large uploads
+
+For large files, use the opt-in resumable upload path. This sends Mux direct-upload chunks with `Content-Range`, so `Pause()` waits for the current chunk to finish and `Resume()` continues with the next chunk. `Cancel()` aborts the in-flight request.
+
+```csharp
+var (handle, task) = uploader.StartResumableUploadAsync(
+    filePath: "/path/to/video.mp4",
+    chunkSizeBytes: 8 * 1024 * 1024,
+    contentType: "video/mp4",
+    progress: progress,
+    authContext: authContext);
+
+handle.Pause();  // pauses after current chunk
+handle.Resume(); // continues with next chunk
+handle.Cancel(); // aborts the upload
+
+var outcome = await task;
+```
+
+The stream overload for resumable uploads requires a seekable stream and known length; use the file-path overload when possible.
+
 ### Large files / long uploads
 
 `HttpClient` often defaults to a **100 second** total request timeout. Big uploads can exceed that and fail mid-stream with `IOException` on the transport. Set a longer or infinite timeout on the `HttpClient` you pass to `MuxDirectUploader`, e.g. `httpClient.Timeout = TimeSpan.FromMilliseconds(-1)` (infinite) or `TimeSpan.FromHours(2)`.

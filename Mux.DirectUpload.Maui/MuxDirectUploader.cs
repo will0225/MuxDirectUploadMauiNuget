@@ -18,6 +18,8 @@ namespace Mux.DirectUpload.Maui;
 /// </remarks>
 public sealed class MuxDirectUploader
 {
+    private const int DefaultResumableChunkSizeBytes = 8 * 1024 * 1024;
+
     private readonly HttpClient _httpClient;
     private readonly IMuxAuthUrlProvider _authUrlProvider;
     private readonly IMuxUploadDetailsProvider? _uploadDetailsProvider;
@@ -97,6 +99,60 @@ public sealed class MuxDirectUploader
         return (new MuxUploadHandle(cts), task);
     }
 
+    /// <summary>
+    /// Starts a chunked Mux direct upload that can pause/resume between chunks.
+    /// </summary>
+    /// <remarks>
+    /// Mux resumable uploads use repeated <c>PUT</c> requests with <c>Content-Range</c>.
+    /// <see cref="MuxUploadHandle.Pause"/> stops after the current in-flight chunk completes; <see cref="MuxUploadHandle.Resume"/>
+    /// continues with the next chunk. <see cref="MuxUploadHandle.Cancel"/> aborts the current request.
+    /// </remarks>
+    public (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) StartResumableUploadAsync(
+        string filePath,
+        int chunkSizeBytes = DefaultResumableChunkSizeBytes,
+        string? contentType = null,
+        IProgress<MuxUploadProgress>? progress = null,
+        CancellationToken externalToken = default,
+        MuxAuthRequestContext? authContext = null)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new ArgumentException("File path must be provided.", nameof(filePath));
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException("Video file not found.", filePath);
+        if (chunkSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(chunkSizeBytes), "Chunk size must be positive.");
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        var pauseController = new MuxUploadPauseController();
+        var task = UploadResumableFromFileAsync(filePath, chunkSizeBytes, contentType, progress, authContext, pauseController, cts.Token);
+        return (new MuxUploadHandle(cts, pauseController), task);
+    }
+
+    /// <summary>
+    /// Starts a chunked Mux direct upload from a seekable stream that can pause/resume between chunks.
+    /// </summary>
+    public (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) StartResumableUploadAsync(
+        Stream stream,
+        long? contentLength = null,
+        int chunkSizeBytes = DefaultResumableChunkSizeBytes,
+        string? contentType = null,
+        bool leaveOpen = false,
+        IProgress<MuxUploadProgress>? progress = null,
+        CancellationToken externalToken = default,
+        MuxAuthRequestContext? authContext = null)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (!stream.CanSeek)
+            throw new ArgumentException("Resumable upload requires a seekable stream. Use file-path upload or StartUploadAsync for non-seekable streams.", nameof(stream));
+        if (chunkSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(chunkSizeBytes), "Chunk size must be positive.");
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        var pauseController = new MuxUploadPauseController();
+        var task = UploadResumableFromStreamAsync(stream, contentLength, leaveOpen, chunkSizeBytes, contentType, progress, authContext, pauseController, cts.Token);
+        return (new MuxUploadHandle(cts, pauseController), task);
+    }
+
     private async Task<MuxUploadOutcome> UploadFromFileAsync(
         string filePath,
         int bufferSizeBytes,
@@ -134,6 +190,49 @@ public sealed class MuxDirectUploader
             contentType,
             progress,
             authContext,
+            cancellationToken);
+
+    private async Task<MuxUploadOutcome> UploadResumableFromFileAsync(
+        string filePath,
+        int chunkSizeBytes,
+        string? contentType,
+        IProgress<MuxUploadProgress>? progress,
+        MuxAuthRequestContext? authContext,
+        MuxUploadPauseController pauseController,
+        CancellationToken cancellationToken)
+    {
+        await using var fileStream = File.OpenRead(filePath);
+        return await UploadResumableCoreAsync(
+            fileStream,
+            disposeStream: false,
+            explicitLength: null,
+            chunkSizeBytes,
+            contentType,
+            progress,
+            authContext,
+            pauseController,
+            cancellationToken);
+    }
+
+    private Task<MuxUploadOutcome> UploadResumableFromStreamAsync(
+        Stream stream,
+        long? explicitLength,
+        bool leaveOpen,
+        int chunkSizeBytes,
+        string? contentType,
+        IProgress<MuxUploadProgress>? progress,
+        MuxAuthRequestContext? authContext,
+        MuxUploadPauseController pauseController,
+        CancellationToken cancellationToken) =>
+        UploadResumableCoreAsync(
+            stream,
+            disposeStream: !leaveOpen,
+            explicitLength,
+            chunkSizeBytes,
+            contentType,
+            progress,
+            authContext,
+            pauseController,
             cancellationToken);
 
     private async Task<MuxUploadOutcome> UploadCoreAsync(
@@ -186,6 +285,94 @@ public sealed class MuxDirectUploader
 
             if (totalForProgress.HasValue)
                 progress?.Report(new MuxUploadProgress(totalForProgress.Value, totalForProgress.Value));
+
+            MuxUploadDetails? details = null;
+            if (_uploadDetailsProvider is not null && !string.IsNullOrWhiteSpace(auth.UploadId))
+            {
+                details = await _uploadDetailsProvider
+                    .GetUploadDetailsAsync(auth.UploadId!, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return new MuxUploadOutcome(auth, details);
+        }
+        finally
+        {
+            if (disposeStream)
+                await sourceStream.DisposeAsync();
+        }
+    }
+
+    private async Task<MuxUploadOutcome> UploadResumableCoreAsync(
+        Stream sourceStream,
+        bool disposeStream,
+        long? explicitLength,
+        int chunkSizeBytes,
+        string? contentType,
+        IProgress<MuxUploadProgress>? progress,
+        MuxAuthRequestContext? authContext,
+        MuxUploadPauseController pauseController,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!sourceStream.CanSeek)
+                throw new InvalidOperationException("Resumable upload requires a seekable stream.");
+
+            var auth = await _authUrlProvider.GetUploadUrlAsync(authContext, cancellationToken);
+            var totalBytes = ResolveTotalBytes(sourceStream, explicitLength)
+                ?? throw new InvalidOperationException("Resumable upload requires a known content length.");
+
+            long offset = 0;
+            progress?.Report(new MuxUploadProgress(0, totalBytes));
+
+            while (offset < totalBytes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await pauseController.WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
+
+                var chunkLength = Math.Min(chunkSizeBytes, totalBytes - offset);
+                var end = offset + chunkLength - 1;
+
+                using var content = new RangedStreamContent(
+                    sourceStream,
+                    offset,
+                    chunkLength,
+                    1024 * 1024,
+                    sent => progress?.Report(new MuxUploadProgress(offset + sent, totalBytes)),
+                    cancellationToken);
+
+                content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, totalBytes);
+                if (!string.IsNullOrWhiteSpace(contentType))
+                    content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+
+                using var request = new HttpRequestMessage(HttpMethod.Put, auth.PutUri)
+                {
+                    Content = content
+                };
+                request.Headers.ExpectContinue = false;
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
+
+                using var response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
+                {
+                    var body = await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
+                    throw new HttpRequestException($"Upload unauthorized/forbidden. Status={(int)response.StatusCode}. Body={body}");
+                }
+
+                if (!response.IsSuccessStatusCode && (int)response.StatusCode != 308)
+                {
+                    var body = await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
+                    throw new HttpRequestException($"Chunk upload failed. Status={(int)response.StatusCode}. Body={body}");
+                }
+
+                offset += chunkLength;
+                progress?.Report(new MuxUploadProgress(offset, totalBytes));
+            }
 
             MuxUploadDetails? details = null;
             if (_uploadDetailsProvider is not null && !string.IsNullOrWhiteSpace(auth.UploadId))
@@ -281,6 +468,61 @@ public sealed class MuxDirectUploader
 
             length = -1;
             return false;
+        }
+    }
+
+    private sealed class RangedStreamContent : HttpContent
+    {
+        private readonly Stream _source;
+        private readonly long _start;
+        private readonly long _length;
+        private readonly int _bufferSize;
+        private readonly Action<long> _onProgress;
+        private readonly CancellationToken _ct;
+
+        public RangedStreamContent(
+            Stream source,
+            long start,
+            long length,
+            int bufferSize,
+            Action<long> onProgress,
+            CancellationToken ct)
+        {
+            _source = source;
+            _start = start;
+            _length = length;
+            _bufferSize = bufferSize;
+            _onProgress = onProgress;
+            _ct = ct;
+        }
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            var buffer = new byte[_bufferSize];
+            long remaining = _length;
+            long sent = 0;
+            _source.Position = _start;
+
+            while (remaining > 0)
+            {
+                _ct.ThrowIfCancellationRequested();
+
+                var readLength = (int)Math.Min(buffer.Length, remaining);
+                var read = await _source.ReadAsync(buffer.AsMemory(0, readLength), _ct).ConfigureAwait(false);
+                if (read == 0)
+                    throw new EndOfStreamException("Unexpected end of source stream while uploading chunk.");
+
+                await stream.WriteAsync(buffer.AsMemory(0, read), _ct).ConfigureAwait(false);
+                remaining -= read;
+                sent += read;
+                _onProgress(sent);
+            }
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = _length;
+            return true;
         }
     }
 }

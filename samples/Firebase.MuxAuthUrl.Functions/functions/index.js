@@ -334,9 +334,12 @@ async function createMuxDirectUploadUrl({creatorId, externalId, uploadQualitySet
     authUid,
   });
 
+  console.log("newAssetSettings", newAssetSettings);
+
   const payload = {
     new_asset_settings: newAssetSettings,
     cors_origin: "*",
+
   };
 
   const response = await fetch("https://api.mux.com/video/v1/uploads", {
@@ -401,15 +404,15 @@ exports.getMuxDirectUploadUrl = onRequest(
         return;
       }
 
-      const auth = await verifyFirebaseIdToken(req);
-      if (!auth.ok) {
-        res.status(auth.status).json({error: auth.message});
-        return;
-      }
+      // const auth = await verifyFirebaseIdToken(req);
+      // if (!auth.ok) {
+      //   res.status(auth.status).json({error: auth.message});
+      //   return;
+      // }
 
       try {
         const ctx = readAuthContext(req);
-
+        console.log("ctx data", ctx);
         const body = await createMuxDirectUploadUrl({
           creatorId: ctx.creatorId,
           externalId: ctx.externalId,
@@ -543,11 +546,11 @@ exports.getMuxUploadStatus = onRequest(
         return;
       }
 
-      const auth = await verifyFirebaseIdToken(req);
-      if (!auth.ok) {
-        res.status(auth.status).json({error: auth.message});
-        return;
-      }
+      // const auth = await verifyFirebaseIdToken(req);
+      // if (!auth.ok) {
+      //   res.status(auth.status).json({error: auth.message});
+      //   return;
+      // }
 
       const uploadId = req.query.uploadId || req.query.upload_id;
       if (!uploadId || !String(uploadId).trim()) {

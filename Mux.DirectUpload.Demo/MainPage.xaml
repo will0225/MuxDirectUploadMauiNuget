@@ -72,6 +72,17 @@
                     IsEnabled="False"
                     Clicked="OnCancelUploadClicked" />
 
+            <HorizontalStackLayout Spacing="8">
+                <Button x:Name="PauseUploadButton"
+                        Text="Pause"
+                        IsEnabled="False"
+                        Clicked="OnPauseUploadClicked" />
+                <Button x:Name="ResumeUploadButton"
+                        Text="Resume"
+                        IsEnabled="False"
+                        Clicked="OnResumeUploadClicked" />
+            </HorizontalStackLayout>
+
             <ProgressBar x:Name="UploadProgressBar"
                          Progress="0" />
             <Label x:Name="ProgressLabel"

@@ -180,34 +180,43 @@ public partial class MainPage : ContentPage
             || baseUrlText.Contains(".run.app", StringComparison.OrdinalIgnoreCase);*/
         var looksLikeFirebaseFunction = true;
         var firebaseToken = FirebaseIdTokenEntry.Text?.Trim();
-        if (looksLikeFirebaseFunction && string.IsNullOrWhiteSpace(firebaseToken))
+    /*    if (looksLikeFirebaseFunction && string.IsNullOrWhiteSpace(firebaseToken))
         {
             StatusLabel.Text = "Status: paste a Firebase ID token";
             return;
-        }
+        }*/
 
         try
         {
             StartUploadButton.IsEnabled = false;
             CancelUploadButton.IsEnabled = true;
+            PauseUploadButton.IsEnabled = false;
+            ResumeUploadButton.IsEnabled = false;
             PickFileButton.IsEnabled = false;
             MainThread.BeginInvokeOnMainThread(ClearResultLabels);
             StatusLabel.Text = "Status: opening video and requesting upload URL...";
             UploadProgressBar.Progress = 0;
             ProgressLabel.Text = "Progress: 0%";
 
-            var videoStream = await _pickedVideo.OpenReadAsync();
+            var localFilePath = !string.IsNullOrWhiteSpace(_pickedVideo.FullPath) && File.Exists(_pickedVideo.FullPath)
+                ? _pickedVideo.FullPath
+                : null;
+            Stream? videoStream = null;
 
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
             // Default HttpClient.Timeout is often 100s — large videos need a longer limit or uploads abort mid-stream.
             httpClient.Timeout = TimeSpan.FromMilliseconds(-1);
 
-            var authProvider = new BearerMuxAuthUrlProvider(
-                httpClient,
-                endpointPath: string.IsNullOrWhiteSpace(EndpointPathEntry.Text)
-                    ? "/muxpackageauthapi/us-central1/getMuxDirectUploadUrl"
-                    : EndpointPathEntry.Text.Trim(),
-                getBearerTokenAsync: ct => Task.FromResult(firebaseToken ?? string.Empty));
+            var authEndpointPath = string.IsNullOrWhiteSpace(EndpointPathEntry.Text)
+                ? "/muxpackageauthapi/us-central1/getMuxDirectUploadUrl"
+                : EndpointPathEntry.Text.Trim();
+
+            IMuxAuthUrlProvider authProvider = string.IsNullOrWhiteSpace(firebaseToken)
+                ? new HttpMuxAuthUrlProvider(httpClient, authEndpointPath)
+                : new BearerMuxAuthUrlProvider(
+                    httpClient,
+                    endpointPath: authEndpointPath,
+                    getBearerTokenAsync: ct => Task.FromResult(firebaseToken ?? string.Empty));
 
             var fetchDetailsAfterPut = looksLikeFirebaseFunction && !string.IsNullOrWhiteSpace(firebaseToken);
             var useWebhookStatus = UseWebhookStatusSwitch.IsToggled;
@@ -233,12 +242,18 @@ public partial class MainPage : ContentPage
             var uploader = new MuxDirectUploader(httpClient, authProvider, detailsProvider);
             var progress = new Progress<MuxUploadProgress>(p =>
             {
-                var percent = p.Percent ?? 0;
                 var totalPart = p.TotalBytes.HasValue ? $"/{p.TotalBytes}" : "";
                 MainThread.BeginInvokeOnMainThread(() =>
                 {
-                    UploadProgressBar.Progress = Math.Clamp(percent / 100.0, 0, 1);
-                    ProgressLabel.Text = $"Progress: {percent:F2}% ({p.BytesSent}{totalPart} bytes)";
+                    if (p.Percent is { } percent)
+                    {
+                        UploadProgressBar.Progress = Math.Clamp(percent / 100.0, 0, 1);
+                        ProgressLabel.Text = $"Progress: {percent:F2}% ({p.BytesSent}{totalPart} bytes)";
+                    }
+                    else
+                    {
+                        ProgressLabel.Text = $"Progress: {p.BytesSent}{totalPart} bytes uploaded";
+                    }
                 });
             });
 
@@ -270,15 +285,42 @@ public partial class MainPage : ContentPage
                 };
             }
 
-            var (handle, uploadTask) = uploader.StartUploadAsync(
-                videoStream,
-                contentType: string.IsNullOrWhiteSpace(ContentTypeEntry.Text) ? null : ContentTypeEntry.Text.Trim(),
-                leaveOpen: false,
-                progress: progress,
-                authContext: authContext);
+            var contentType = string.IsNullOrWhiteSpace(ContentTypeEntry.Text) ? null : ContentTypeEntry.Text.Trim();
+            (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) upload;
+            if (localFilePath is not null)
+            {
+                upload = uploader.StartResumableUploadAsync(
+                    localFilePath,
+                    contentType: contentType,
+                    progress: progress,
+                    authContext: authContext);
+            }
+            else
+            {
+                videoStream = await _pickedVideo.OpenReadAsync();
+                upload = videoStream.CanSeek
+                    ? uploader.StartResumableUploadAsync(
+                        videoStream,
+                        contentType: contentType,
+                        leaveOpen: false,
+                        progress: progress,
+                        authContext: authContext)
+                    : uploader.StartUploadAsync(
+                    videoStream,
+                    contentLength: null,
+                    contentType: contentType,
+                    leaveOpen: false,
+                    progress: progress,
+                    authContext: authContext);
+            }
 
+            var (handle, uploadTask) = upload;
             _currentUploadHandle = handle;
-            StatusLabel.Text = "Status: upload started";
+            PauseUploadButton.IsEnabled = handle.CanPause;
+            ResumeUploadButton.IsEnabled = false;
+            StatusLabel.Text = handle.CanPause
+                ? "Status: resumable upload started"
+                : "Status: upload started (stream is not seekable; pause/resume disabled)";
 
             var outcome = await uploadTask;
 
@@ -300,6 +342,8 @@ public partial class MainPage : ContentPage
         {
             _currentUploadHandle = null;
             CancelUploadButton.IsEnabled = false;
+            PauseUploadButton.IsEnabled = false;
+            ResumeUploadButton.IsEnabled = false;
             PickFileButton.IsEnabled = true;
             StartUploadButton.IsEnabled = _pickedVideo is not null;
         }
@@ -308,5 +352,27 @@ public partial class MainPage : ContentPage
     private void OnCancelUploadClicked(object? sender, EventArgs e)
     {
         _currentUploadHandle?.Cancel();
+    }
+
+    private void OnPauseUploadClicked(object? sender, EventArgs e)
+    {
+        if (_currentUploadHandle is null || !_currentUploadHandle.CanPause)
+            return;
+
+        _currentUploadHandle.Pause();
+        PauseUploadButton.IsEnabled = false;
+        ResumeUploadButton.IsEnabled = true;
+        StatusLabel.Text = "Status: upload pausing after current chunk...";
+    }
+
+    private void OnResumeUploadClicked(object? sender, EventArgs e)
+    {
+        if (_currentUploadHandle is null || !_currentUploadHandle.CanPause)
+            return;
+
+        _currentUploadHandle.Resume();
+        PauseUploadButton.IsEnabled = true;
+        ResumeUploadButton.IsEnabled = false;
+        StatusLabel.Text = "Status: upload resumed";
     }
 }
