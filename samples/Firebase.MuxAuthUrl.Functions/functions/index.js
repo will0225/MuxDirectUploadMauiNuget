@@ -404,11 +404,11 @@ exports.getMuxDirectUploadUrl = onRequest(
         return;
       }
 
-      // const auth = await verifyFirebaseIdToken(req);
-      // if (!auth.ok) {
-      //   res.status(auth.status).json({error: auth.message});
-      //   return;
-      // }
+      const auth = await verifyFirebaseIdToken(req);
+      if (!auth.ok) {
+        res.status(auth.status).json({error: auth.message});
+        return;
+      }
 
       try {
         const ctx = readAuthContext(req);
@@ -546,11 +546,11 @@ exports.getMuxUploadStatus = onRequest(
         return;
       }
 
-      // const auth = await verifyFirebaseIdToken(req);
-      // if (!auth.ok) {
-      //   res.status(auth.status).json({error: auth.message});
-      //   return;
-      // }
+      const auth = await verifyFirebaseIdToken(req);
+      if (!auth.ok) {
+        res.status(auth.status).json({error: auth.message});
+        return;
+      }
 
       const uploadId = req.query.uploadId || req.query.upload_id;
       if (!uploadId || !String(uploadId).trim()) {
