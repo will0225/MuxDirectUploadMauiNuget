@@ -12,12 +12,12 @@
             <Label Text="Backend Base URL (your secure API):" />
             <Entry x:Name="BackendBaseUrlEntry"
                    Placeholder="https://your-api.example.com"
-                   Text="https://localhost:5001" />
+                   Text="http://localhost:5001" />
 
             <Label Text="Auth URL Endpoint Path:" />
             <Entry x:Name="EndpointPathEntry"
                    Placeholder="/api/mux/direct-upload-url or / for Cloud Run root"
-                   Text="/api/mux/direct-upload-url" />
+                   Text="" />
 
             <HorizontalStackLayout Spacing="12">
                 <Switch x:Name="UseWebhookStatusSwitch"
