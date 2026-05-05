@@ -78,6 +78,8 @@ If the stream is not seekable and you cannot supply `contentLength`, progress ma
 
 For large files, use the opt-in resumable upload path. This sends Mux direct-upload chunks with `Content-Range`, so `Pause()` waits for the current chunk to finish and `Resume()` continues with the next chunk. `Cancel()` aborts the in-flight request.
 
+**Progress:** For resumable uploads, **`IProgress<MuxUploadProgress>`** advances **once per completed HTTP chunk** (after Mux acknowledges that chunk), not continuously within a chunk. That matches bytes reliably uploaded and avoids the UI jumping to ~100% while `HttpClient` is still draining the socket—many stacks buffer request data ahead of the wire.
+
 ```csharp
 var (handle, task) = uploader.StartResumableUploadAsync(
     filePath: "/path/to/video.mp4",
@@ -94,6 +96,40 @@ var outcome = await task;
 ```
 
 The stream overload for resumable uploads requires a seekable stream and known length; use the file-path overload when possible.
+
+### Persisted resumable uploads (survive app restart)
+
+In-process pause/resume only helps while the app is running. To resume after a crash, OS kill, or user force-quit, persist **`MuxResumableUploadSession`** (e.g. JSON in app data) and call **`ContinuePersistedResumableUploadAsync`**. The uploader sends a **probe** `PUT` with an empty body and `Content-Range: bytes */<total>`; Mux responds with **308** and a **`Range`** header (or **200** when the file is already complete) so the next byte offset is authoritative. After each successful chunk, save the session again (the library passes a **`persistSessionAsync`** callback for that).
+
+**Caveats:** The signed **PUT URL can expire**. Pass **`authContextForReauth`** (same shape as `CreatePersistedUploadSessionAsync`) into **`ContinuePersistedResumableUploadAsync`**: on **401/403** during probe or a chunk, the library requests a **fresh** direct upload once, updates **`PutUri`** / ids on the session, resets progress to byte **0** for that new Mux upload, persists, and continues (bytes previously accepted under the old URL are not merged — same as a new direct upload). Without **`authContextForReauth`**, **401/403** surfaces as **`HttpRequestException`**.
+
+The **local file** must still exist at **`LocalFilePath`**. Copy gallery/picker files into **app data** before uploading if the OS may delete temp paths after restart (the demo copies into **`AppDataDirectory/mux_uploads`** when the source is outside app data). Reuse the **same** `ChunkSizeBytes` and `ContentType` you used when the session was created.
+
+The demo app persists session rows in **SQLite** (`MuxUploadSqliteSessionStore`, database under app data); it migrates a legacy **`mux_resumable_session.json`** file on first launch if present.
+
+```csharp
+// New upload: get auth once, save session, then upload (persists offset after each chunk)
+var session = await uploader.CreatePersistedUploadSessionAsync(
+    filePath,
+    contentType: "video/mp4",
+    authContext: authContext);
+await File.WriteAllTextAsync(sessionPath, JsonSerializer.Serialize(session), ct);
+
+var (handle, task) = uploader.ContinuePersistedResumableUploadAsync(
+    session,
+    async (s, ct) =>
+    {
+        await File.WriteAllTextAsync(sessionPath, JsonSerializer.Serialize(s), ct);
+    },
+    progress: progress,
+    authContextForReauth: authContext);
+var outcome = await task;
+File.Delete(sessionPath); // on success
+
+// After restart: deserialize session from disk, same ContinuePersistedResumableUploadAsync
+```
+
+For testing or custom clients, **`MuxDirectUploader.ProbeMuxResumeOffsetAsync(HttpClient, Uri, long totalBytes, string? contentType, CancellationToken)`** returns the next byte offset without uploading data.
 
 ### Large files / long uploads
 

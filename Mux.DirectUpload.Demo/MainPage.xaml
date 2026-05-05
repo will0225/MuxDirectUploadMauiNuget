@@ -67,6 +67,11 @@
                     IsEnabled="False"
                     Clicked="OnStartUploadClicked" />
 
+            <Button x:Name="ResumeSavedUploadButton"
+                    Text="Resume saved upload (persisted session)"
+                    IsEnabled="False"
+                    Clicked="OnResumeSavedUploadClicked" />
+
             <Button x:Name="CancelUploadButton"
                     Text="Cancel Upload"
                     IsEnabled="False"

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 
@@ -19,6 +20,8 @@ namespace Mux.DirectUpload.Maui;
 public sealed class MuxDirectUploader
 {
     private const int DefaultResumableChunkSizeBytes = 8 * 1024 * 1024;
+
+    private readonly record struct ProbeMuxResumeResult(long NextOffset, bool Unauthorized);
 
     private readonly HttpClient _httpClient;
     private readonly IMuxAuthUrlProvider _authUrlProvider;
@@ -150,6 +153,78 @@ public sealed class MuxDirectUploader
         var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
         var pauseController = new MuxUploadPauseController();
         var task = UploadResumableFromStreamAsync(stream, contentLength, leaveOpen, chunkSizeBytes, contentType, progress, authContext, pauseController, cts.Token);
+        return (new MuxUploadHandle(cts, pauseController), task);
+    }
+
+    /// <summary>
+    /// Creates auth-backed session state for a resumable upload. Persist <see cref="MuxResumableUploadSession"/> (JSON, SQLite, etc.),
+    /// then call <see cref="ContinuePersistedResumableUploadAsync"/> after process restart.
+    /// </summary>
+    public async Task<MuxResumableUploadSession> CreatePersistedUploadSessionAsync(
+        string filePath,
+        int chunkSizeBytes = DefaultResumableChunkSizeBytes,
+        string? contentType = null,
+        MuxAuthRequestContext? authContext = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new ArgumentException("File path must be provided.", nameof(filePath));
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException("Video file not found.", filePath);
+        if (chunkSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(chunkSizeBytes), "Chunk size must be positive.");
+
+        var auth = await _authUrlProvider.GetUploadUrlAsync(authContext, cancellationToken).ConfigureAwait(false);
+        var info = new FileInfo(filePath);
+        return new MuxResumableUploadSession
+        {
+            PutUri = auth.PutUri.AbsoluteUri,
+            UploadId = auth.UploadId,
+            AssetId = auth.AssetId,
+            PlaybackId = auth.PlaybackId,
+            LocalFilePath = Path.GetFullPath(filePath),
+            FileSizeBytes = info.Length,
+            ChunkSizeBytes = chunkSizeBytes,
+            ContentType = contentType,
+            BytesUploadedSoFar = 0,
+            LastUpdatedUtc = DateTimeOffset.UtcNow,
+        };
+    }
+
+    /// <summary>
+    /// Continues a persisted resumable upload: probes Mux for the current byte offset, uploads remaining chunks,
+    /// and invokes <paramref name="persistSessionAsync"/> after each successful chunk (and after probe).
+    /// </summary>
+    /// <param name="authContextForReauth">
+    /// When set, an expired or invalid signed PUT URL (<c>401</c>/<c>403</c> on probe or chunk) triggers one automatic
+    /// <see cref="IMuxAuthUrlProvider.GetUploadUrlAsync"/> call; the session is updated with the new URL and ids and the upload
+    /// continues from byte <c>0</c> against the new direct upload (prior partial bytes on the old URL are not carried over).
+    /// </param>
+    public (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) ContinuePersistedResumableUploadAsync(
+        MuxResumableUploadSession session,
+        Func<MuxResumableUploadSession, CancellationToken, Task> persistSessionAsync,
+        IProgress<MuxUploadProgress>? progress = null,
+        CancellationToken externalToken = default,
+        MuxAuthRequestContext? authContextForReauth = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(persistSessionAsync);
+        if (string.IsNullOrWhiteSpace(session.PutUri))
+            throw new ArgumentException("Session PutUri is required.", nameof(session));
+        if (string.IsNullOrWhiteSpace(session.LocalFilePath) || !File.Exists(session.LocalFilePath))
+            throw new FileNotFoundException("Session local file not found.", session.LocalFilePath);
+        if (session.ChunkSizeBytes <= 0)
+            throw new ArgumentException("Session ChunkSizeBytes must be positive.", nameof(session));
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        var pauseController = new MuxUploadPauseController();
+        var task = ContinuePersistedResumableCoreAsync(
+            session,
+            persistSessionAsync,
+            pauseController,
+            progress,
+            authContextForReauth,
+            cts.Token);
         return (new MuxUploadHandle(cts, pauseController), task);
     }
 
@@ -319,13 +394,313 @@ public sealed class MuxDirectUploader
             if (!sourceStream.CanSeek)
                 throw new InvalidOperationException("Resumable upload requires a seekable stream.");
 
-            var auth = await _authUrlProvider.GetUploadUrlAsync(authContext, cancellationToken);
+            var auth = await _authUrlProvider.GetUploadUrlAsync(authContext, cancellationToken).ConfigureAwait(false);
             var totalBytes = ResolveTotalBytes(sourceStream, explicitLength)
                 ?? throw new InvalidOperationException("Resumable upload requires a known content length.");
 
-            long offset = 0;
-            progress?.Report(new MuxUploadProgress(0, totalBytes));
+            return await UploadResumableChunksAsync(
+                auth,
+                sourceStream,
+                disposeStream: false,
+                totalBytes,
+                startOffset: 0,
+                chunkSizeBytes,
+                contentType,
+                progress,
+                pauseController,
+                onChunkCompleteAsync: null,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (disposeStream)
+                await sourceStream.DisposeAsync();
+        }
+    }
 
+    private async Task<MuxUploadOutcome> ContinuePersistedResumableCoreAsync(
+        MuxResumableUploadSession session,
+        Func<MuxResumableUploadSession, CancellationToken, Task> persistSessionAsync,
+        MuxUploadPauseController pauseController,
+        IProgress<MuxUploadProgress>? progress,
+        MuxAuthRequestContext? authContextForReauth,
+        CancellationToken cancellationToken)
+    {
+        await using var fs = File.OpenRead(session.LocalFilePath);
+        if (!fs.CanSeek)
+            throw new InvalidOperationException("Local file stream must be seekable.");
+
+        var totalBytes = fs.Length;
+        if (session.FileSizeBytes != totalBytes)
+        {
+            session.FileSizeBytes = totalBytes;
+            session.LastUpdatedUtc = DateTimeOffset.UtcNow;
+            await persistSessionAsync(session, cancellationToken).ConfigureAwait(false);
+        }
+
+        var probeUsedReauth = false;
+        long startOffset;
+        while (true)
+        {
+            var putUri = new Uri(session.PutUri, UriKind.Absolute);
+            var probe = await TryProbeMuxResumeOffsetAsync(
+                    _httpClient,
+                    putUri,
+                    totalBytes,
+                    session.ContentType,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!probe.Unauthorized)
+            {
+                startOffset = probe.NextOffset;
+                break;
+            }
+
+            if (authContextForReauth is null)
+            {
+                throw new HttpRequestException(
+                    "Resume probe unauthorized/forbidden — signed PUT URL may have expired. Pass authContextForReauth to retry with a fresh URL, or create a new persisted session.");
+            }
+
+            if (probeUsedReauth)
+                throw new HttpRequestException(
+                    "Resume probe still unauthorized after re-auth — check backend credentials or token.");
+
+            await RefreshPersistedSessionFromAuthAsync(session, authContextForReauth, persistSessionAsync, cancellationToken)
+                .ConfigureAwait(false);
+            probeUsedReauth = true;
+            startOffset = 0;
+            break;
+        }
+
+        if (startOffset < 0)
+            startOffset = 0;
+        if (startOffset > totalBytes)
+            startOffset = totalBytes;
+
+        session.BytesUploadedSoFar = startOffset;
+        session.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        await persistSessionAsync(session, cancellationToken).ConfigureAwait(false);
+
+        var auth = new MuxAuthUrlResult(
+            new Uri(session.PutUri, UriKind.Absolute),
+            session.UploadId,
+            session.AssetId,
+            session.PlaybackId);
+
+        async Task OnChunk(long newOffset, CancellationToken ct)
+        {
+            session.BytesUploadedSoFar = newOffset;
+            session.LastUpdatedUtc = DateTimeOffset.UtcNow;
+            await persistSessionAsync(session, ct).ConfigureAwait(false);
+        }
+
+        return await UploadResumableChunksAsync(
+            auth,
+            fs,
+            disposeStream: false,
+            totalBytes,
+            startOffset,
+            session.ChunkSizeBytes,
+            session.ContentType,
+            progress,
+            pauseController,
+            OnChunk,
+            cancellationToken,
+            session,
+            authContextForReauth,
+            persistSessionAsync).ConfigureAwait(false);
+    }
+
+    private async Task RefreshPersistedSessionFromAuthAsync(
+        MuxResumableUploadSession session,
+        MuxAuthRequestContext authContext,
+        Func<MuxResumableUploadSession, CancellationToken, Task> persistSessionAsync,
+        CancellationToken cancellationToken)
+    {
+        var auth = await _authUrlProvider.GetUploadUrlAsync(authContext, cancellationToken).ConfigureAwait(false);
+        session.PutUri = auth.PutUri.AbsoluteUri;
+        session.UploadId = auth.UploadId;
+        session.AssetId = auth.AssetId;
+        session.PlaybackId = auth.PlaybackId;
+        session.BytesUploadedSoFar = 0;
+        session.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        await persistSessionAsync(session, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Probes the Mux direct-upload URL for how many bytes are already stored (resume offset).
+    /// </summary>
+    public static async Task<long> ProbeMuxResumeOffsetAsync(
+        HttpClient httpClient,
+        Uri putUri,
+        long totalBytes,
+        string? contentType,
+        CancellationToken cancellationToken = default)
+    {
+        var probe = await TryProbeMuxResumeOffsetAsync(httpClient, putUri, totalBytes, contentType, cancellationToken)
+            .ConfigureAwait(false);
+        if (probe.Unauthorized)
+        {
+            throw new HttpRequestException(
+                "Resume probe unauthorized/forbidden — signed PUT URL may have expired.");
+        }
+
+        return probe.NextOffset;
+    }
+
+    private static async Task<ProbeMuxResumeResult> TryProbeMuxResumeOffsetAsync(
+        HttpClient httpClient,
+        Uri putUri,
+        long totalBytes,
+        string? contentType,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(httpClient);
+        ArgumentNullException.ThrowIfNull(putUri);
+        if (totalBytes < 0)
+            throw new ArgumentOutOfRangeException(nameof(totalBytes));
+
+        using var content = new ByteArrayContent(Array.Empty<byte>());
+        content.Headers.ContentRange = new ContentRangeHeaderValue(totalBytes);
+        if (!string.IsNullOrWhiteSpace(contentType))
+            content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, putUri) { Content = content };
+        request.Headers.ExpectContinue = false;
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
+
+        using var response = await httpClient
+            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
+        {
+            await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
+            return new ProbeMuxResumeResult(0, Unauthorized: true);
+        }
+
+        if (response.StatusCode == HttpStatusCode.OK)
+            return new ProbeMuxResumeResult(totalBytes, Unauthorized: false);
+
+        if ((int)response.StatusCode == 308)
+        {
+            if (TryGetNextOffsetFromHeaders(response, out var next))
+                return new ProbeMuxResumeResult(Math.Min(next, totalBytes), Unauthorized: false);
+            return new ProbeMuxResumeResult(0, Unauthorized: false);
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
+            throw new HttpRequestException($"Resume probe failed. Status={(int)response.StatusCode}. Body={body}");
+        }
+
+        if (TryGetNextOffsetFromHeaders(response, out var o))
+            return new ProbeMuxResumeResult(Math.Min(o, totalBytes), Unauthorized: false);
+        return new ProbeMuxResumeResult(0, Unauthorized: false);
+    }
+
+    private static bool TryGetNextOffsetFromHeaders(HttpResponseMessage response, out long nextByteOffset)
+    {
+        nextByteOffset = 0;
+        if (response.Headers.TryGetValues("Range", out var rangeVals))
+        {
+            var v = rangeVals.FirstOrDefault();
+            if (TryParseRangeHeaderToNextOffset(v, out nextByteOffset))
+                return true;
+        }
+
+        if (response.Content.Headers.ContentRange is { } cr)
+        {
+            if (cr.HasRange && cr.To is not null)
+            {
+                nextByteOffset = cr.To.Value + 1;
+                return true;
+            }
+        }
+
+        // Some stacks echo Content-Range on the response
+        if (response.Headers.TryGetValues("Content-Range", out var crVals))
+        {
+            var s = crVals.FirstOrDefault();
+            if (TryParseContentRangeStringToNextOffset(s, out nextByteOffset))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseRangeHeaderToNextOffset(string? rangeValue, out long nextByteOffset)
+    {
+        nextByteOffset = 0;
+        if (string.IsNullOrWhiteSpace(rangeValue))
+            return false;
+        // Range: bytes=0-524287
+        var eq = rangeValue.IndexOf('=');
+        if (eq < 0)
+            return false;
+        var span = rangeValue.AsSpan(eq + 1).Trim();
+        var dash = span.IndexOf('-');
+        if (dash < 0)
+            return false;
+        var endPart = span[(dash + 1)..];
+        if (!long.TryParse(endPart, NumberStyles.Integer, CultureInfo.InvariantCulture, out var endInclusive))
+            return false;
+        nextByteOffset = endInclusive + 1;
+        return true;
+    }
+
+    private static bool TryParseContentRangeStringToNextOffset(string? value, out long nextByteOffset)
+    {
+        nextByteOffset = 0;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+        // Content-Range: bytes 0-524287/25000000
+        var slash = value.LastIndexOf('/');
+        if (slash < 0)
+            return false;
+        var rangePart = value.AsSpan(0, slash).Trim();
+        var space = rangePart.LastIndexOf(' ');
+        if (space < 0)
+            return false;
+        var numbers = rangePart[(space + 1)..].Trim();
+        var dash = numbers.IndexOf('-');
+        if (dash < 0)
+            return false;
+        if (!long.TryParse(numbers[(dash + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var endInclusive))
+            return false;
+        nextByteOffset = endInclusive + 1;
+        return true;
+    }
+
+    private async Task<MuxUploadOutcome> UploadResumableChunksAsync(
+        MuxAuthUrlResult auth,
+        Stream sourceStream,
+        bool disposeStream,
+        long totalBytes,
+        long startOffset,
+        int chunkSizeBytes,
+        string? contentType,
+        IProgress<MuxUploadProgress>? progress,
+        MuxUploadPauseController pauseController,
+        Func<long, CancellationToken, Task>? onChunkCompleteAsync,
+        CancellationToken cancellationToken,
+        MuxResumableUploadSession? sessionForReauth = null,
+        MuxAuthRequestContext? reauthContext = null,
+        Func<MuxResumableUploadSession, CancellationToken, Task>? persistForReauth = null)
+    {
+        try
+        {
+            if (startOffset > totalBytes)
+                startOffset = totalBytes;
+
+            progress?.Report(new MuxUploadProgress(startOffset, totalBytes));
+
+            var currentAuth = auth;
+            var chunkReauthUsed = false;
+            var offset = startOffset;
             while (offset < totalBytes)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -334,19 +709,22 @@ public sealed class MuxDirectUploader
                 var chunkLength = Math.Min(chunkSizeBytes, totalBytes - offset);
                 var end = offset + chunkLength - 1;
 
+                // Do not report progress from inside SerializeToStreamAsync: many HttpClient stacks buffer the
+                // request body quickly, so bytes-written callbacks can jump to ~100% while the network upload continues.
+                // Progress is reported only after each chunk HTTP response (bytes committed per Mux resumable semantics).
                 using var content = new RangedStreamContent(
                     sourceStream,
                     offset,
                     chunkLength,
                     1024 * 1024,
-                    sent => progress?.Report(new MuxUploadProgress(offset + sent, totalBytes)),
+                    onProgress: null,
                     cancellationToken);
 
                 content.Headers.ContentRange = new ContentRangeHeaderValue(offset, end, totalBytes);
                 if (!string.IsNullOrWhiteSpace(contentType))
                     content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
 
-                using var request = new HttpRequestMessage(HttpMethod.Put, auth.PutUri)
+                using var request = new HttpRequestMessage(HttpMethod.Put, currentAuth.PutUri)
                 {
                     Content = content
                 };
@@ -360,11 +738,34 @@ public sealed class MuxDirectUploader
 
                 if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
                 {
-                    var body = await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
-                    throw new HttpRequestException($"Upload unauthorized/forbidden. Status={(int)response.StatusCode}. Body={body}");
+                    var canReauthChunk = sessionForReauth is not null
+                        && reauthContext is not null
+                        && persistForReauth is not null
+                        && !chunkReauthUsed;
+                    if (!canReauthChunk)
+                    {
+                        var body = await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
+                        throw new HttpRequestException(
+                            $"Upload unauthorized/forbidden. Status={(int)response.StatusCode}. Body={body}");
+                    }
+
+                    chunkReauthUsed = true;
+                    var sess = sessionForReauth!;
+                    await RefreshPersistedSessionFromAuthAsync(sess, reauthContext!, persistForReauth!, cancellationToken)
+                        .ConfigureAwait(false);
+                    currentAuth = new MuxAuthUrlResult(
+                        new Uri(sess.PutUri, UriKind.Absolute),
+                        sess.UploadId,
+                        sess.AssetId,
+                        sess.PlaybackId);
+                    offset = 0;
+                    sourceStream.Position = 0;
+                    progress?.Report(new MuxUploadProgress(0, totalBytes));
+                    continue;
                 }
 
-                if (!response.IsSuccessStatusCode && (int)response.StatusCode != 308)
+                // Final chunk: 200 OK. Intermediate chunks: 308 Resume Incomplete.
+                if (response.StatusCode != HttpStatusCode.OK && (int)response.StatusCode != 308)
                 {
                     var body = await SafeReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
                     throw new HttpRequestException($"Chunk upload failed. Status={(int)response.StatusCode}. Body={body}");
@@ -372,17 +773,20 @@ public sealed class MuxDirectUploader
 
                 offset += chunkLength;
                 progress?.Report(new MuxUploadProgress(offset, totalBytes));
+
+                if (onChunkCompleteAsync is not null)
+                    await onChunkCompleteAsync(offset, cancellationToken).ConfigureAwait(false);
             }
 
             MuxUploadDetails? details = null;
-            if (_uploadDetailsProvider is not null && !string.IsNullOrWhiteSpace(auth.UploadId))
+            if (_uploadDetailsProvider is not null && !string.IsNullOrWhiteSpace(currentAuth.UploadId))
             {
                 details = await _uploadDetailsProvider
-                    .GetUploadDetailsAsync(auth.UploadId!, cancellationToken)
+                    .GetUploadDetailsAsync(currentAuth.UploadId!, cancellationToken)
                     .ConfigureAwait(false);
             }
 
-            return new MuxUploadOutcome(auth, details);
+            return new MuxUploadOutcome(currentAuth, details);
         }
         finally
         {
@@ -437,6 +841,8 @@ public sealed class MuxDirectUploader
         {
             var buffer = new byte[_bufferSize];
             long totalSent = 0;
+            long lastReported = 0;
+            const long minReportStepBytes = 512 * 1024;
 
             while (true)
             {
@@ -448,8 +854,15 @@ public sealed class MuxDirectUploader
 
                 await stream.WriteAsync(buffer.AsMemory(0, read), _ct);
                 totalSent += read;
-                _onProgress(totalSent);
+                if (totalSent - lastReported >= minReportStepBytes)
+                {
+                    _onProgress(totalSent);
+                    lastReported = totalSent;
+                }
             }
+
+            if (totalSent != lastReported)
+                _onProgress(totalSent);
         }
 
         protected override bool TryComputeLength(out long length)
@@ -477,7 +890,7 @@ public sealed class MuxDirectUploader
         private readonly long _start;
         private readonly long _length;
         private readonly int _bufferSize;
-        private readonly Action<long> _onProgress;
+        private readonly Action<long>? _onProgress;
         private readonly CancellationToken _ct;
 
         public RangedStreamContent(
@@ -485,7 +898,7 @@ public sealed class MuxDirectUploader
             long start,
             long length,
             int bufferSize,
-            Action<long> onProgress,
+            Action<long>? onProgress,
             CancellationToken ct)
         {
             _source = source;
@@ -515,7 +928,7 @@ public sealed class MuxDirectUploader
                 await stream.WriteAsync(buffer.AsMemory(0, read), _ct).ConfigureAwait(false);
                 remaining -= read;
                 sent += read;
-                _onProgress(sent);
+                _onProgress?.Invoke(sent);
             }
         }
 
