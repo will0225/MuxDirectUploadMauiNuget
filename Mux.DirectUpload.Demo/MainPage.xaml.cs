@@ -1,5 +1,8 @@
 using System.Linq;
 using System.Text.Json;
+#if WINDOWS
+using System.Security.Principal;
+#endif
 using Mux.DirectUpload.Maui;
 
 namespace Mux.DirectUpload.Demo;
@@ -329,15 +332,107 @@ public partial class MainPage : ContentPage
         return Path.GetFullPath(dest);
     }
 
+#if WINDOWS
+    private static bool IsRunningAsAdministrator()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            var principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+#endif
+
     private async void OnPickVideoClicked(object? sender, EventArgs e)
     {
         try
         {
-            var results = await MediaPicker.Default.PickVideosAsync();
-            var result = results?.FirstOrDefault();
+            FileResult? result;
+
+#if WINDOWS
+            Exception? windowsPickerError = null;
+            Exception? windowsFallbackError = null;
+            try
+            {
+                // Prefer MediaPicker first for behavior parity across platforms.
+#pragma warning disable CS0618 // Keep single-file API as first attempt on Windows
+                result = await MediaPicker.Default.PickVideoAsync();
+#pragma warning restore CS0618
+            }
+            catch (Exception ex)
+            {
+                windowsPickerError = ex;
+                result = null;
+            }
+
+            // Fallback: use native WinRT picker with HWND init for unpackaged reliability.
+            if (result is null)
+            {
+                try
+                {
+                    result = await WindowsVideoPickHelper.PickVideoAsync();
+                }
+                catch (Exception ex)
+                {
+                    windowsFallbackError = ex;
+                    if (windowsPickerError is null)
+                        windowsPickerError = windowsFallbackError;
+                }
+            }
 
             if (result is null)
+            {
+                if (windowsPickerError is not null || windowsFallbackError is not null)
+                {
+                    static string FormatException(string prefix, Exception ex)
+                    {
+                        var inner = ex.InnerException?.Message;
+                        var detail = string.IsNullOrWhiteSpace(inner)
+                            ? ex.ToString()
+                            : $"{ex}\nINNER: {inner}";
+                        return $"{prefix}: {detail}";
+                    }
+
+                    var parts = new List<string>();
+                    if (windowsPickerError is not null)
+                        parts.Add(FormatException("MediaPicker", windowsPickerError));
+                    if (windowsFallbackError is not null)
+                        parts.Add(FormatException("WindowsVideoPickHelper", windowsFallbackError));
+
+                    var adminHint = IsRunningAsAdministrator()
+                        ? " | hint: app appears to be running as Administrator; WinUI picker COM APIs often fail in unpackaged admin mode. Run the app as a normal user."
+                        : " | hint: if this app is running as Administrator, close it and run as normal user.";
+                    StatusLabel.Text = $"Status: pick failed - {string.Join(" || ", parts)}{adminHint}";
+                }
+                else
+                {
+                    StatusLabel.Text =
+                        "Status: pick failed - both MediaPicker and WindowsVideoPickHelper returned no file and no exception";
+                }
+
                 return;
+            }
+#else
+            var multi = await MediaPicker.Default.PickVideosAsync();
+            result = multi?.FirstOrDefault();
+            if (result is null)
+            {
+#pragma warning disable CS0618 // Single-file fallback until MAUI fixes PickVideosAsync on all targets
+                result = await MediaPicker.Default.PickVideoAsync();
+#pragma warning restore CS0618
+            }
+#endif
+
+            if (result is null)
+            {
+                StatusLabel.Text = "Status: pick canceled or no file returned by picker";
+                return;
+            }
 
             _pickedVideo = result;
             SelectedFileLabel.Text = $"Selected: {result.FileName ?? "video"}";
@@ -346,11 +441,29 @@ public partial class MainPage : ContentPage
             var path = !string.IsNullOrWhiteSpace(result.FullPath) && File.Exists(result.FullPath)
                 ? Path.GetFullPath(result.FullPath)
                 : null;
-            var saved = await TryLoadSessionAsync().ConfigureAwait(false);
+
+            MuxResumableUploadSession? saved = null;
+            try
+            {
+                saved = await TryLoadSessionAsync();
+            }
+            catch
+            {
+                /* Session store must not block picking if SQLite fails on this device. */
+            }
+
             if (saved is not null && path is not null
                 && !string.Equals(saved.LocalFilePath, path, StringComparison.OrdinalIgnoreCase))
             {
-                await ClearSessionAsync().ConfigureAwait(false);
+                try
+                {
+                    await ClearSessionAsync();
+                }
+                catch
+                {
+                    /* ignore */
+                }
+
                 _ = RefreshResumeSavedUploadUiAsync();
             }
 
@@ -358,7 +471,11 @@ public partial class MainPage : ContentPage
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = $"Status: pick failed - {ex.Message}";
+            var inner = ex.InnerException?.Message;
+            var detail = string.IsNullOrWhiteSpace(inner)
+                ? ex.ToString()
+                : $"{ex}\nINNER: {inner}";
+            StatusLabel.Text = $"Status: pick failed - {detail}";
         }
     }
 
@@ -419,11 +536,10 @@ public partial class MainPage : ContentPage
             (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) upload;
             if (localFilePath is not null)
             {
-                await ClearSessionAsync().ConfigureAwait(false);
+                await ClearSessionAsync();
                 MainThread.BeginInvokeOnMainThread(() =>
                     StatusLabel.Text = "Status: copying video to app storage (if needed)…");
-                localFilePath = await EnsureStableLocalVideoCopyAsync(localFilePath, CancellationToken.None)
-                    .ConfigureAwait(false);
+                localFilePath = await EnsureStableLocalVideoCopyAsync(localFilePath, CancellationToken.None);
                 MainThread.BeginInvokeOnMainThread(() =>
                     SelectedFileLabel.Text = $"Selected (stable path): {Path.GetFileName(localFilePath)}");
 
@@ -469,7 +585,7 @@ public partial class MainPage : ContentPage
             var outcome = await uploadTask;
 
             if (localFilePath is not null)
-                await ClearSessionAsync().ConfigureAwait(false);
+                await ClearSessionAsync();
 
             MainThread.BeginInvokeOnMainThread(() => ApplyOutcomeToLabels(outcome, setup.FetchDetailsAfterPut, setup.UseWebhookStatus));
 
@@ -499,11 +615,11 @@ public partial class MainPage : ContentPage
 
     private async void OnResumeSavedUploadClicked(object? sender, EventArgs e)
     {
-        var session = await TryLoadSessionAsync().ConfigureAwait(false);
+        var session = await TryLoadSessionAsync();
         if (session is null || string.IsNullOrWhiteSpace(session.LocalFilePath) || !File.Exists(session.LocalFilePath))
         {
             StatusLabel.Text = "Status: no saved session or local file is missing";
-            await RefreshResumeSavedUploadUiAsync().ConfigureAwait(false);
+            await RefreshResumeSavedUploadUiAsync();
             return;
         }
 
@@ -550,7 +666,7 @@ public partial class MainPage : ContentPage
 
             var outcome = await uploadTask;
 
-            await ClearSessionAsync().ConfigureAwait(false);
+            await ClearSessionAsync();
 
             MainThread.BeginInvokeOnMainThread(() => ApplyOutcomeToLabels(outcome, setup.FetchDetailsAfterPut, setup.UseWebhookStatus));
 
