@@ -298,6 +298,33 @@ public partial class MainPage : ContentPage
     }
 
     /// <summary>
+    /// When <see cref="FileResult.FullPath"/> is missing, copy picker content into app data so persisted uploads have stable bytes.
+    /// </summary>
+    private static async Task<string> CopyPickedVideoToStableAppPathFromOpenReadAsync(
+        FileResult pick,
+        CancellationToken cancellationToken)
+    {
+        var destDir = Path.Combine(FileSystem.AppDataDirectory, "mux_uploads");
+        Directory.CreateDirectory(destDir);
+        var ext = Path.GetExtension(pick.FileName);
+        if (string.IsNullOrEmpty(ext))
+            ext = ".mp4";
+        var dest = Path.Combine(destDir, $"{Guid.NewGuid():N}{ext}");
+
+        await using var src = await pick.OpenReadAsync().ConfigureAwait(false);
+        await using (var dst = new FileStream(
+                           dest,
+                           FileMode.CreateNew,
+                           FileAccess.Write,
+                           FileShare.None,
+                           bufferSize: 1024 * 1024,
+                           options: FileOptions.Asynchronous))
+            await src.CopyToAsync(dst, cancellationToken).ConfigureAwait(false);
+
+        return Path.GetFullPath(dest);
+    }
+
+    /// <summary>
     /// Gallery / temp picker paths may disappear after restart — copy into app data for persisted uploads.
     /// </summary>
     private static async Task<string> EnsureStableLocalVideoCopyAsync(string sourcePath, CancellationToken cancellationToken)
@@ -518,7 +545,6 @@ public partial class MainPage : ContentPage
             var localFilePath = !string.IsNullOrWhiteSpace(_pickedVideo.FullPath) && File.Exists(_pickedVideo.FullPath)
                 ? _pickedVideo.FullPath
                 : null;
-            Stream? videoStream = null;
 
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
             // Default HttpClient.Timeout is often 100s — large videos need a longer limit or uploads abort mid-stream.
@@ -557,21 +583,38 @@ public partial class MainPage : ContentPage
             }
             else
             {
-                videoStream = await _pickedVideo.OpenReadAsync();
-                upload = videoStream.CanSeek
-                    ? setup.Uploader.StartResumableUploadAsync(
-                        videoStream,
-                        contentType: contentType,
-                        leaveOpen: false,
-                        progress: setup.Progress,
-                        authContext: authContext)
-                    : setup.Uploader.StartUploadAsync(
-                        videoStream,
-                        contentLength: null,
-                        contentType: contentType,
-                        leaveOpen: false,
-                        progress: setup.Progress,
-                        authContext: authContext);
+                await ClearSessionAsync();
+                MainThread.BeginInvokeOnMainThread(() =>
+                    StatusLabel.Text = "Status: no usable FullPath — copying picker stream to app data…");
+                var stablePath =
+                    await CopyPickedVideoToStableAppPathFromOpenReadAsync(_pickedVideo, CancellationToken.None)
+                        .ConfigureAwait(false);
+                MainThread.BeginInvokeOnMainThread(() =>
+                    SelectedFileLabel.Text = $"Selected (stable path): {Path.GetFileName(stablePath)}");
+
+                StatusLabel.Text = "Status: requesting upload URL (persisted resumable, session from stream)...";
+                await using (var fs = new FileStream(
+                                   stablePath,
+                                   FileMode.Open,
+                                   FileAccess.Read,
+                                   FileShare.Read,
+                                   bufferSize: 1024 * 1024,
+                                   options: FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    var session = await setup.Uploader.CreatePersistedUploadSessionAsync(
+                            fs,
+                            persistedLocalPathForSession: stablePath,
+                            leaveOpen: true,
+                            contentType: contentType,
+                            authContext: authContext)
+                        .ConfigureAwait(false);
+                    await SaveSessionAsync(session).ConfigureAwait(false);
+                    upload = setup.Uploader.ContinuePersistedResumableUploadAsync(
+                        session,
+                        PersistSessionAsync,
+                        setup.Progress,
+                        authContextForReauth: authContext);
+                }
             }
 
             var (handle, uploadTask) = upload;
@@ -584,8 +627,7 @@ public partial class MainPage : ContentPage
 
             var outcome = await uploadTask;
 
-            if (localFilePath is not null)
-                await ClearSessionAsync();
+            await ClearSessionAsync();
 
             MainThread.BeginInvokeOnMainThread(() => ApplyOutcomeToLabels(outcome, setup.FetchDetailsAfterPut, setup.UseWebhookStatus));
 

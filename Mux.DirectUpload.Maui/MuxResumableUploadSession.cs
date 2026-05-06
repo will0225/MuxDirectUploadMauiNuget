@@ -2,7 +2,9 @@ namespace Mux.DirectUpload.Maui;
 
 /// <summary>
 /// Serializable state for resuming a Mux direct upload after app restart or crash.
-/// Persist this (e.g. JSON file, SQLite) between launches; keep <see cref="LocalFilePath"/> valid until upload completes.
+/// Persist this (e.g. JSON file, SQLite) between launches.
+/// When using the file-path continuation API, keep <see cref="LocalFilePath"/> pointing at readable bytes until the upload completes.
+/// When <see cref="LocalFilePath"/> is empty, resume using <see cref="MuxDirectUploader"/>'s persisted continuation overload that accepts a seekable stream factory.
 /// </summary>
 public sealed class MuxResumableUploadSession
 {
@@ -18,7 +20,10 @@ public sealed class MuxResumableUploadSession
 
     public string? PlaybackId { get; set; }
 
-    /// <summary>Local video file to read bytes from (must still exist when resuming).</summary>
+    /// <summary>
+    /// Local video file to read bytes from when using the file-path persisted continuation overload.
+    /// May be empty when the session was created from a stream-only API and you resume with a stream factory.
+    /// </summary>
     public string LocalFilePath { get; set; } = "";
 
     public long FileSizeBytes { get; set; }

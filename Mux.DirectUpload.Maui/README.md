@@ -103,7 +103,9 @@ In-process pause/resume only helps while the app is running. To resume after a c
 
 **Caveats:** The signed **PUT URL can expire**. Pass **`authContextForReauth`** (same shape as `CreatePersistedUploadSessionAsync`) into **`ContinuePersistedResumableUploadAsync`**: on **401/403** during probe or a chunk, the library requests a **fresh** direct upload once, updates **`PutUri`** / ids on the session, resets progress to byte **0** for that new Mux upload, persists, and continues (bytes previously accepted under the old URL are not merged — same as a new direct upload). Without **`authContextForReauth`**, **401/403** surfaces as **`HttpRequestException`**.
 
-The **local file** must still exist at **`LocalFilePath`**. Copy gallery/picker files into **app data** before uploading if the OS may delete temp paths after restart (the demo copies into **`AppDataDirectory/mux_uploads`** when the source is outside app data). Reuse the **same** `ChunkSizeBytes` and `ContentType` you used when the session was created.
+**Byte source on resume:** Either keep a stable path in **`LocalFilePath`** (copy gallery/picker files into **app data** first when temp paths may disappear), **or** leave **`LocalFilePath`** empty and call **`ContinuePersistedResumableUploadAsync`** with a **`Func<CancellationToken, Task<Stream>>`** that opens the same bytes again (seekable stream). You can build the persisted session from a file path (**`CreatePersistedUploadSessionAsync(string)`**) or from a seekable stream (**`CreatePersistedUploadSessionAsync(Stream, persistedLocalPathForSession: ...)`** — optional path is stored for file-based continuation after restart).
+
+The demo copies into **`AppDataDirectory/mux_uploads`** when the pick has no reliable **`FullPath`**, then creates the persisted session from a **`FileStream`** so behavior does not depend on **`FileResult.FullPath`**. Reuse the **same** `ChunkSizeBytes` and `ContentType` you used when the session was created.
 
 The demo app persists session rows in **SQLite** (`MuxUploadSqliteSessionStore`, database under app data); it migrates a legacy **`mux_resumable_session.json`** file on first launch if present.
 
@@ -127,6 +129,15 @@ var outcome = await task;
 File.Delete(sessionPath); // on success
 
 // After restart: deserialize session from disk, same ContinuePersistedResumableUploadAsync
+
+// Path-free continuation (e.g. resolve Android content URI or your own key each launch):
+// var (handle2, task2) = uploader.ContinuePersistedResumableUploadAsync(
+//     session,
+//     openSeekableStreamAsync: async ct => await OpenSeekableVideoAsync(session, ct),
+//     persistSessionAsync: ...,
+//     leaveOpen: false,
+//     progress: progress,
+//     authContextForReauth: authContext);
 ```
 
 For testing or custom clients, **`MuxDirectUploader.ProbeMuxResumeOffsetAsync(HttpClient, Uri, long totalBytes, string? contentType, CancellationToken)`** returns the next byte offset without uploading data.

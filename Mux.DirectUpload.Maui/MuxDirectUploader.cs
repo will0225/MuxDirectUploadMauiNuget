@@ -158,7 +158,7 @@ public sealed class MuxDirectUploader
 
     /// <summary>
     /// Creates auth-backed session state for a resumable upload. Persist <see cref="MuxResumableUploadSession"/> (JSON, SQLite, etc.),
-    /// then call <see cref="ContinuePersistedResumableUploadAsync"/> after process restart.
+    /// then call <c>ContinuePersistedResumableUploadAsync</c> after process restart.
     /// </summary>
     public async Task<MuxResumableUploadSession> CreatePersistedUploadSessionAsync(
         string filePath,
@@ -192,6 +192,60 @@ public sealed class MuxDirectUploader
     }
 
     /// <summary>
+    /// Creates auth-backed session state for a resumable upload from a <b>seekable</b> stream (for example after
+    /// <c>MediaPicker</c> <c>OpenReadAsync()</c> when <c>FileResult.FullPath</c> is unreliable).
+    /// </summary>
+    /// <param name="seekableVideoStream">Must be seekable; length defines <see cref="MuxResumableUploadSession.FileSizeBytes"/>.</param>
+    /// <param name="persistedLocalPathForSession">
+    /// Optional path written to <see cref="MuxResumableUploadSession.LocalFilePath"/> so a deserialized session still knows
+    /// where bytes live on disk (for example a copy under app data). Omit to leave <see cref="MuxResumableUploadSession.LocalFilePath"/> empty
+    /// and resume only via the persisted continuation overload that takes a seekable stream factory.
+    /// </param>
+    /// <param name="leaveOpen">If false, <paramref name="seekableVideoStream"/> is disposed after the session is built.</param>
+    public async Task<MuxResumableUploadSession> CreatePersistedUploadSessionAsync(
+        Stream seekableVideoStream,
+        string? persistedLocalPathForSession = null,
+        bool leaveOpen = true,
+        int chunkSizeBytes = DefaultResumableChunkSizeBytes,
+        string? contentType = null,
+        MuxAuthRequestContext? authContext = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(seekableVideoStream);
+        if (!seekableVideoStream.CanSeek)
+        {
+            throw new ArgumentException(
+                "Persisted session creation requires a seekable stream (same requirement as resumable chunk uploads).",
+                nameof(seekableVideoStream));
+        }
+
+        if (chunkSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(chunkSizeBytes), "Chunk size must be positive.");
+
+        var auth = await _authUrlProvider.GetUploadUrlAsync(authContext, cancellationToken).ConfigureAwait(false);
+        var session = new MuxResumableUploadSession
+        {
+            PutUri = auth.PutUri.AbsoluteUri,
+            UploadId = auth.UploadId,
+            AssetId = auth.AssetId,
+            PlaybackId = auth.PlaybackId,
+            LocalFilePath = string.IsNullOrWhiteSpace(persistedLocalPathForSession)
+                ? ""
+                : Path.GetFullPath(persistedLocalPathForSession),
+            FileSizeBytes = seekableVideoStream.Length,
+            ChunkSizeBytes = chunkSizeBytes,
+            ContentType = contentType,
+            BytesUploadedSoFar = 0,
+            LastUpdatedUtc = DateTimeOffset.UtcNow,
+        };
+
+        if (!leaveOpen)
+            await seekableVideoStream.DisposeAsync().ConfigureAwait(false);
+
+        return session;
+    }
+
+    /// <summary>
     /// Continues a persisted resumable upload: probes Mux for the current byte offset, uploads remaining chunks,
     /// and invokes <paramref name="persistSessionAsync"/> after each successful chunk (and after probe).
     /// </summary>
@@ -220,6 +274,52 @@ public sealed class MuxDirectUploader
         var pauseController = new MuxUploadPauseController();
         var task = ContinuePersistedResumableCoreAsync(
             session,
+            openSeekableStreamAsync: ct =>
+                Task.FromResult<Stream>(File.OpenRead(session.LocalFilePath)),
+            leaveOpen: false,
+            persistSessionAsync,
+            pauseController,
+            progress,
+            authContextForReauth,
+            cts.Token);
+        return (new MuxUploadHandle(cts, pauseController), task);
+    }
+
+    /// <summary>
+    /// Continues a persisted resumable upload using a factory that opens the same byte source again (required when
+    /// <see cref="MuxResumableUploadSession.LocalFilePath"/> is empty or when paths are not stable across launches).
+    /// </summary>
+    /// <param name="openSeekableStreamAsync">
+    /// Called once at the start of continuation; must return a seekable stream whose length matches (or updates)
+    /// <see cref="MuxResumableUploadSession.FileSizeBytes"/>.
+    /// </param>
+    /// <param name="leaveOpen">
+    /// If false (default), the opened stream is disposed after the upload completes. Pass true only when your factory
+    /// returns a stream you manage separately.
+    /// </param>
+    public (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) ContinuePersistedResumableUploadAsync(
+        MuxResumableUploadSession session,
+        Func<CancellationToken, Task<Stream>> openSeekableStreamAsync,
+        Func<MuxResumableUploadSession, CancellationToken, Task> persistSessionAsync,
+        bool leaveOpen = false,
+        IProgress<MuxUploadProgress>? progress = null,
+        CancellationToken externalToken = default,
+        MuxAuthRequestContext? authContextForReauth = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(openSeekableStreamAsync);
+        ArgumentNullException.ThrowIfNull(persistSessionAsync);
+        if (string.IsNullOrWhiteSpace(session.PutUri))
+            throw new ArgumentException("Session PutUri is required.", nameof(session));
+        if (session.ChunkSizeBytes <= 0)
+            throw new ArgumentException("Session ChunkSizeBytes must be positive.", nameof(session));
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        var pauseController = new MuxUploadPauseController();
+        var task = ContinuePersistedResumableCoreAsync(
+            session,
+            openSeekableStreamAsync,
+            leaveOpen,
             persistSessionAsync,
             pauseController,
             progress,
@@ -420,15 +520,21 @@ public sealed class MuxDirectUploader
 
     private async Task<MuxUploadOutcome> ContinuePersistedResumableCoreAsync(
         MuxResumableUploadSession session,
+        Func<CancellationToken, Task<Stream>> openSeekableStreamAsync,
+        bool leaveOpen,
         Func<MuxResumableUploadSession, CancellationToken, Task> persistSessionAsync,
         MuxUploadPauseController pauseController,
         IProgress<MuxUploadProgress>? progress,
         MuxAuthRequestContext? authContextForReauth,
         CancellationToken cancellationToken)
     {
-        await using var fs = File.OpenRead(session.LocalFilePath);
+        var fs = await openSeekableStreamAsync(cancellationToken).ConfigureAwait(false);
         if (!fs.CanSeek)
-            throw new InvalidOperationException("Local file stream must be seekable.");
+        {
+            if (!leaveOpen)
+                await fs.DisposeAsync().ConfigureAwait(false);
+            throw new InvalidOperationException("Persisted resume requires a seekable stream.");
+        }
 
         var totalBytes = fs.Length;
         if (session.FileSizeBytes != totalBytes)
@@ -499,7 +605,7 @@ public sealed class MuxDirectUploader
         return await UploadResumableChunksAsync(
             auth,
             fs,
-            disposeStream: false,
+            disposeStream: !leaveOpen,
             totalBytes,
             startOffset,
             session.ChunkSizeBytes,
