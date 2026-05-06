@@ -47,9 +47,14 @@ public partial class MainPage : ContentPage
     private async Task<bool> CanResumeSavedUploadAsync()
     {
         var s = await TryLoadSessionAsync().ConfigureAwait(false);
-        return s is not null
-               && !string.IsNullOrWhiteSpace(s.LocalFilePath)
-               && File.Exists(s.LocalFilePath);
+        if (s is null)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(s.LocalFilePath))
+            return File.Exists(s.LocalFilePath);
+
+        // Stream-only persisted sessions can resume after the user re-picks the same source in this demo.
+        return _pickedVideo is not null;
     }
 
     private Task SaveSessionAsync(MuxResumableUploadSession session, CancellationToken cancellationToken = default) =>
@@ -282,81 +287,24 @@ public partial class MainPage : ContentPage
         return string.Join("\n", map.Select(kv => $"{kv.Key}: {kv.Value}"));
     }
 
-    private static bool IsPathUnderDirectory(string path, string directoryRoot)
+    private async Task<Stream> OpenPickedVideoSeekableStreamAsync(CancellationToken cancellationToken)
     {
-        try
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_pickedVideo is null)
         {
-            var root = Path.GetFullPath(directoryRoot.TrimEnd(Path.DirectorySeparatorChar));
-            var p = Path.GetFullPath(path);
-            return p.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                || p.Equals(root, StringComparison.OrdinalIgnoreCase);
+            throw new InvalidOperationException(
+                "No picked video is available. Pick the same video again to resume this stream-based session.");
         }
-        catch
+
+        var stream = await _pickedVideo.OpenReadAsync().ConfigureAwait(false);
+        if (!stream.CanSeek)
         {
-            return false;
+            await stream.DisposeAsync().ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "Picked video stream is not seekable. Demo persisted resume requires a seekable stream source.");
         }
-    }
 
-    /// <summary>
-    /// When <see cref="FileResult.FullPath"/> is missing, copy picker content into app data so persisted uploads have stable bytes.
-    /// </summary>
-    private static async Task<string> CopyPickedVideoToStableAppPathFromOpenReadAsync(
-        FileResult pick,
-        CancellationToken cancellationToken)
-    {
-        var destDir = Path.Combine(FileSystem.AppDataDirectory, "mux_uploads");
-        Directory.CreateDirectory(destDir);
-        var ext = Path.GetExtension(pick.FileName);
-        if (string.IsNullOrEmpty(ext))
-            ext = ".mp4";
-        var dest = Path.Combine(destDir, $"{Guid.NewGuid():N}{ext}");
-
-        await using var src = await pick.OpenReadAsync().ConfigureAwait(false);
-        await using (var dst = new FileStream(
-                           dest,
-                           FileMode.CreateNew,
-                           FileAccess.Write,
-                           FileShare.None,
-                           bufferSize: 1024 * 1024,
-                           options: FileOptions.Asynchronous))
-            await src.CopyToAsync(dst, cancellationToken).ConfigureAwait(false);
-
-        return Path.GetFullPath(dest);
-    }
-
-    /// <summary>
-    /// Gallery / temp picker paths may disappear after restart — copy into app data for persisted uploads.
-    /// </summary>
-    private static async Task<string> EnsureStableLocalVideoCopyAsync(string sourcePath, CancellationToken cancellationToken)
-    {
-        var appData = Path.GetFullPath(FileSystem.AppDataDirectory.TrimEnd(Path.DirectorySeparatorChar));
-        if (IsPathUnderDirectory(sourcePath, appData))
-            return Path.GetFullPath(sourcePath);
-
-        var destDir = Path.Combine(FileSystem.AppDataDirectory, "mux_uploads");
-        Directory.CreateDirectory(destDir);
-        var ext = Path.GetExtension(sourcePath);
-        if (string.IsNullOrEmpty(ext))
-            ext = ".mp4";
-        var dest = Path.Combine(destDir, $"{Guid.NewGuid():N}{ext}");
-
-        await using (var src = new FileStream(
-                           sourcePath,
-                           FileMode.Open,
-                           FileAccess.Read,
-                           FileShare.Read,
-                           bufferSize: 1024 * 1024,
-                           options: FileOptions.Asynchronous | FileOptions.SequentialScan))
-        await using (var dst = new FileStream(
-                           dest,
-                           FileMode.CreateNew,
-                           FileAccess.Write,
-                           FileShare.None,
-                           bufferSize: 1024 * 1024,
-                           options: FileOptions.Asynchronous))
-            await src.CopyToAsync(dst, cancellationToken).ConfigureAwait(false);
-
-        return Path.GetFullPath(dest);
+        return stream;
     }
 
 #if WINDOWS
@@ -542,10 +490,6 @@ public partial class MainPage : ContentPage
             UploadProgressBar.Progress = 0;
             ProgressLabel.Text = "Progress: 0%";
 
-            var localFilePath = !string.IsNullOrWhiteSpace(_pickedVideo.FullPath) && File.Exists(_pickedVideo.FullPath)
-                ? _pickedVideo.FullPath
-                : null;
-
             using var httpClient = new HttpClient { BaseAddress = backendBaseUri };
             // Default HttpClient.Timeout is often 100s — large videos need a longer limit or uploads abort mid-stream.
             httpClient.Timeout = TimeSpan.FromMilliseconds(-1);
@@ -558,16 +502,17 @@ public partial class MainPage : ContentPage
                 return;
             }
 
+            var localFilePath = !string.IsNullOrWhiteSpace(_pickedVideo.FullPath) && File.Exists(_pickedVideo.FullPath)
+                ? _pickedVideo.FullPath
+                : null;
+
             var contentType = string.IsNullOrWhiteSpace(ContentTypeEntry.Text) ? null : ContentTypeEntry.Text.Trim();
             (MuxUploadHandle handle, Task<MuxUploadOutcome> uploadTask) upload;
             if (localFilePath is not null)
             {
                 await ClearSessionAsync();
                 MainThread.BeginInvokeOnMainThread(() =>
-                    StatusLabel.Text = "Status: copying video to app storage (if needed)…");
-                localFilePath = await EnsureStableLocalVideoCopyAsync(localFilePath, CancellationToken.None);
-                MainThread.BeginInvokeOnMainThread(() =>
-                    SelectedFileLabel.Text = $"Selected (stable path): {Path.GetFileName(localFilePath)}");
+                    SelectedFileLabel.Text = $"Selected: {Path.GetFileName(localFilePath)}");
 
                 StatusLabel.Text = "Status: requesting upload URL (persisted resumable)...";
                 var session = await setup.Uploader.CreatePersistedUploadSessionAsync(
@@ -585,36 +530,25 @@ public partial class MainPage : ContentPage
             {
                 await ClearSessionAsync();
                 MainThread.BeginInvokeOnMainThread(() =>
-                    StatusLabel.Text = "Status: no usable FullPath — copying picker stream to app data…");
-                var stablePath =
-                    await CopyPickedVideoToStableAppPathFromOpenReadAsync(_pickedVideo, CancellationToken.None)
-                        .ConfigureAwait(false);
-                MainThread.BeginInvokeOnMainThread(() =>
-                    SelectedFileLabel.Text = $"Selected (stable path): {Path.GetFileName(stablePath)}");
+                    StatusLabel.Text = "Status: no usable FullPath — creating persisted stream session (no local copy)…");
 
-                StatusLabel.Text = "Status: requesting upload URL (persisted resumable, session from stream)...";
-                await using (var fs = new FileStream(
-                                   stablePath,
-                                   FileMode.Open,
-                                   FileAccess.Read,
-                                   FileShare.Read,
-                                   bufferSize: 1024 * 1024,
-                                   options: FileOptions.Asynchronous | FileOptions.SequentialScan))
-                {
-                    var session = await setup.Uploader.CreatePersistedUploadSessionAsync(
-                            fs,
-                            persistedLocalPathForSession: stablePath,
-                            leaveOpen: true,
-                            contentType: contentType,
-                            authContext: authContext)
-                        .ConfigureAwait(false);
-                    await SaveSessionAsync(session).ConfigureAwait(false);
-                    upload = setup.Uploader.ContinuePersistedResumableUploadAsync(
-                        session,
-                        PersistSessionAsync,
-                        setup.Progress,
-                        authContextForReauth: authContext);
-                }
+                await using var initialStream = await OpenPickedVideoSeekableStreamAsync(CancellationToken.None).ConfigureAwait(false);
+                var session = await setup.Uploader.CreatePersistedUploadSessionAsync(
+                        initialStream,
+                        persistedLocalPathForSession: null,
+                        leaveOpen: true,
+                        contentType: contentType,
+                        authContext: authContext)
+                    .ConfigureAwait(false);
+                await SaveSessionAsync(session).ConfigureAwait(false);
+
+                upload = setup.Uploader.ContinuePersistedResumableUploadAsync(
+                    session,
+                    openSeekableStreamAsync: OpenPickedVideoSeekableStreamAsync,
+                    persistSessionAsync: PersistSessionAsync,
+                    leaveOpen: false,
+                    progress: setup.Progress,
+                    authContextForReauth: authContext);
             }
 
             var (handle, uploadTask) = upload;
@@ -658,9 +592,17 @@ public partial class MainPage : ContentPage
     private async void OnResumeSavedUploadClicked(object? sender, EventArgs e)
     {
         var session = await TryLoadSessionAsync();
-        if (session is null || string.IsNullOrWhiteSpace(session.LocalFilePath) || !File.Exists(session.LocalFilePath))
+        if (session is null)
         {
-            StatusLabel.Text = "Status: no saved session or local file is missing";
+            StatusLabel.Text = "Status: no saved session";
+            await RefreshResumeSavedUploadUiAsync();
+            return;
+        }
+
+        var hasLocalPath = !string.IsNullOrWhiteSpace(session.LocalFilePath) && File.Exists(session.LocalFilePath);
+        if (!hasLocalPath && _pickedVideo is null)
+        {
+            StatusLabel.Text = "Status: saved stream session found — pick the same video again, then tap Resume saved upload.";
             await RefreshResumeSavedUploadUiAsync();
             return;
         }
@@ -694,11 +636,19 @@ public partial class MainPage : ContentPage
             }
 
             var setup = CreateUploadSetupForPage(httpClient, looksLikeFirebaseFunction: true);
-            var upload = setup.Uploader.ContinuePersistedResumableUploadAsync(
-                session,
-                PersistSessionAsync,
-                setup.Progress,
-                authContextForReauth: resumeAuthContext);
+            var upload = hasLocalPath
+                ? setup.Uploader.ContinuePersistedResumableUploadAsync(
+                    session,
+                    PersistSessionAsync,
+                    setup.Progress,
+                    authContextForReauth: resumeAuthContext)
+                : setup.Uploader.ContinuePersistedResumableUploadAsync(
+                    session,
+                    openSeekableStreamAsync: OpenPickedVideoSeekableStreamAsync,
+                    persistSessionAsync: PersistSessionAsync,
+                    leaveOpen: false,
+                    progress: setup.Progress,
+                    authContextForReauth: resumeAuthContext);
 
             var (handle, uploadTask) = upload;
             _currentUploadHandle = handle;
